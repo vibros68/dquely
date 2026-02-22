@@ -106,6 +106,18 @@ func Regexp(field, pattern string, flags ...string) FilterExpr {
 	return FilterExpr{expr: fmt.Sprintf("regexp(%s, /%s/%s)", field, pattern, flag)}
 }
 
+// ExpandAll is the DGraph predicate that expands all predicates of a node.
+const ExpandAll = "expand(_all_)"
+
+// ExpandAllBlock creates an expand(_all_) { fields... } inline select element.
+func ExpandAllBlock(fields ...string) *DQuely {
+	args := make([]any, len(fields))
+	for i, f := range fields {
+		args[i] = f
+	}
+	return New().Select(args...).As(ExpandAll).Inline()
+}
+
 // renderKey renders the left operand of a comparison: predicate name or FilterExpr (val/count).
 func renderKey(v any) string {
 	switch e := v.(type) {
@@ -150,8 +162,11 @@ type DQuely struct {
 	queryArgs []string // ordering/extra args for root and nested: "orderdesc: ...", "orderasc: ..."
 	firstN    *int     // first: N — combined with queryArgs+offsetN into one field "(args)" group
 	offsetN   *int     // offset: N — combined with queryArgs+firstN into one field "(args)" group
-	selects      []any
-	filters      []filter
+	inline    bool     // render nested select on one line: "name { field1 field2 }"
+	cascade   bool     // adds @cascade directive before @filter / {
+	groupBy   string   // adds @groupby(field) directive
+	selects   []any
+	filters   []filter
 }
 
 func New() *DQuely {
@@ -229,6 +244,29 @@ func (d *DQuely) Offset(n int) *DQuely {
 func (d *DQuely) BlockVar(varName string) *DQuely {
 	clone := d.getInstance()
 	clone.blockVarName = varName
+	return clone
+}
+
+// Inline marks this nested select to render on a single line: "name { field1 field2 }".
+func (d *DQuely) Inline() *DQuely {
+	clone := d.getInstance()
+	clone.inline = true
+	return clone
+}
+
+// GroupBy adds the @groupby(field) directive to this block or nested select.
+func (d *DQuely) GroupBy(field string) *DQuely {
+	clone := d.getInstance()
+	clone.groupBy = field
+	return clone
+}
+
+// Cascade adds the @cascade directive to this block or nested select.
+// With @cascade, nodes that don't have all predicates specified in the query are removed.
+// This can be useful in cases where some filter was applied or if nodes might not have all listed predicates.
+func (d *DQuely) Cascade() *DQuely {
+	clone := d.getInstance()
+	clone.cascade = true
 	return clone
 }
 
@@ -388,9 +426,27 @@ func (d *DQuely) renderFields(sb *strings.Builder, indent string) {
 			if len(fieldArgs) > 0 {
 				fieldArgsStr = "(" + strings.Join(fieldArgs, ", ") + ")"
 			}
-			sb.WriteString(indent + prefix + v.name + fieldArgsStr + v.inlineFilter() + " {\n")
-			v.renderFields(sb, indent+"  ")
-			sb.WriteString(indent + "}\n")
+			cascadeStr := ""
+			if v.cascade {
+				cascadeStr = " @cascade"
+			}
+			groupByStr := ""
+			if v.groupBy != "" {
+				groupByStr = fmt.Sprintf(" @groupby(%s)", v.groupBy)
+			}
+			if v.inline {
+				var parts []string
+				for _, s := range v.selects {
+					if str, ok := s.(string); ok {
+						parts = append(parts, str)
+					}
+				}
+				sb.WriteString(indent + prefix + v.name + fieldArgsStr + cascadeStr + groupByStr + v.inlineFilter() + " { " + strings.Join(parts, " ") + " }\n")
+			} else {
+				sb.WriteString(indent + prefix + v.name + fieldArgsStr + cascadeStr + groupByStr + v.inlineFilter() + " {\n")
+				v.renderFields(sb, indent+"  ")
+				sb.WriteString(indent + "}\n")
+			}
 		}
 	}
 }
@@ -450,18 +506,27 @@ func (d *DQuely) renderBlock(sb *strings.Builder, blockName string) {
 		blockPrefix = d.blockVarName + " as "
 	}
 
+	cascadeStr := ""
+	if d.cascade {
+		cascadeStr = " @cascade"
+	}
+	groupByStr := ""
+	if d.groupBy != "" {
+		groupByStr = fmt.Sprintf(" @groupby(%s)", d.groupBy)
+	}
+
 	switch {
 	case len(atFilters) == 0:
 		// No @filter
-		sb.WriteString(fmt.Sprintf("  %s%s(%s) {\n", blockPrefix, blockName, argsStr))
+		sb.WriteString(fmt.Sprintf("  %s%s(%s)%s%s {\n", blockPrefix, blockName, argsStr, cascadeStr, groupByStr))
 
 	case len(atFilters) == 1 && len(atFilters[0].orExprs) == 0:
 		// Single simple filter → inline
-		sb.WriteString(fmt.Sprintf("  %s%s(%s) @filter(%s) {\n", blockPrefix, blockName, argsStr, atFilters[0].expr))
+		sb.WriteString(fmt.Sprintf("  %s%s(%s)%s%s @filter(%s) {\n", blockPrefix, blockName, argsStr, cascadeStr, groupByStr, atFilters[0].expr))
 
 	default:
 		// Multiple filters → multiline
-		sb.WriteString(fmt.Sprintf("  %s%s(%s)\n", blockPrefix, blockName, argsStr))
+		sb.WriteString(fmt.Sprintf("  %s%s(%s)%s%s\n", blockPrefix, blockName, argsStr, cascadeStr, groupByStr))
 		sb.WriteString("  @filter(\n")
 		for i, f := range atFilters {
 			prefix := ""

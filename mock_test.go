@@ -449,3 +449,42 @@ const orderComplexMock = `{
     }
   }
 }`
+
+const expandAllMock = `{
+  uids(func: has(director.film), first: 1) {
+    uid
+    expand(_all_) { u as uid }
+  }
+
+  result(func: uid(u)) {
+    count(uid)
+  }
+}`
+
+const cascadeDirectiveMock = `{
+  HP(func: allofterms(name@en, "Harry Potter")) @cascade {
+    name@en
+    starring {
+      performance.character {
+        name@en
+      }
+      performance.actor @filter(allofterms(name@en, "Warwick")) {
+        name@en
+      }
+    }
+  }
+}`
+
+const groupByWithCommentMock = `{
+  var(func: allofterms(name@en, "steven spielberg")) {
+    director.film @groupby(genre) {
+      a as count(uid)
+      # a is a genre UID to count value variable
+    }
+  }
+
+  byGenre(func: uid(a), orderdesc: val(a)) {
+    name@en
+    total_movies : val(a)
+  }
+}`

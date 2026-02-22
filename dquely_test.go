@@ -563,6 +563,66 @@ func TestOrderComplex(t *testing.T) {
 	}
 }
 
+func TestGroupByWithComment(t *testing.T) {
+	directorFilm := dquely.New().
+		Select("a as count(uid)", "# a is a genre UID to count value variable").
+		As("director.film").
+		GroupBy("genre")
+	q1 := dquely.NewVar().
+		AllOfTerms("name@en", "steven spielberg").
+		Select(directorFilm)
+
+	q2 := dquely.New().
+		Uid("a").
+		Order("val(a)", dquely.DESC).
+		Select("name@en", "total_movies : val(a)").
+		As("byGenre")
+
+	query := dquely.Build(q1, q2)
+	if query != groupByWithCommentMock {
+		t.Errorf("expected dquely.Build() to return %s, got %s", groupByWithCommentMock, query)
+	}
+}
+
+func TestCascadeDirective(t *testing.T) {
+	performanceCharacter := dquely.New().
+		Select("name@en").
+		As("performance.character")
+	performanceActor := dquely.New().
+		Select("name@en").
+		As("performance.actor").
+		Filter(dquely.AllOfTerms("name@en", "Warwick"))
+	starring := dquely.New().
+		Select(performanceCharacter, performanceActor).
+		As("starring")
+	dql := dquely.New().
+		AllOfTerms("name@en", "Harry Potter").
+		Cascade().
+		Select("name@en", starring)
+	query := dql.Query("HP")
+	if query != cascadeDirectiveMock {
+		t.Errorf("expected dql.Query() to return %s, got %s", cascadeDirectiveMock, query)
+	}
+}
+
+func TestExpandAll(t *testing.T) {
+	q1 := dquely.New().
+		Has("director.film").
+		First(1).
+		Select("uid", dquely.ExpandAllBlock("u as uid")).
+		As("uids")
+
+	q2 := dquely.New().
+		Uid("u").
+		Select("count(uid)").
+		As("result")
+
+	query := dquely.Build(q1, q2)
+	if query != expandAllMock {
+		t.Errorf("expected dquely.Build() to return %s, got %s", expandAllMock, query)
+	}
+}
+
 func TestQueryWithOffset(t *testing.T) {
 	genre := dquely.New().
 		Select("name@en").
