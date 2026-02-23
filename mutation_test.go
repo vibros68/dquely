@@ -61,6 +61,17 @@ func TestUpsertWithQuery(t *testing.T) {
 	}
 }
 
+func TestMutationUserLack(t *testing.T) {
+	user := &UserLack{Name: "Alice", Age: 29, Email: "alice@example.com"}
+	result, err := dquely.Mutation(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != userLackMutationMock {
+		t.Errorf("expected Mutation() to return %s, got %s", userLackMutationMock, result)
+	}
+}
+
 func TestMutationWithDgraphType(t *testing.T) {
 	user := &UserDgraph{Name: "Alice", Age: 29, Email: "alice@example.com"}
 	result, err := dquely.Mutation(user)

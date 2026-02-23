@@ -84,6 +84,26 @@ type UserDgraph struct {
 	Email string `dquely:"email"`
 }
 
+const userLackMutationMock = `{
+  set {
+    _:user <name> "Alice" .
+    _:user <Email> "alice@example.com" .
+    _:user <Age> "29" .
+    _:user <dgraph.type> "User" .
+  }
+}`
+
+type UserLack struct {
+	Uid   string `dquely:"uid"`
+	Name  string `dquely:"name"`
+	Age   int
+	Email string
+}
+
+func (u *UserLack) DgraphType() string {
+	return "User"
+}
+
 func (u *UserDgraph) DgraphType() string {
 	return "User"
 }

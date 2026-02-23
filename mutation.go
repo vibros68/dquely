@@ -36,8 +36,11 @@ func Mutation(input any) (string, error) {
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
 			tag := field.Tag.Get("dquely")
-			if tag == "" || tag == "-" {
+			if tag == "-" {
 				continue
+			}
+			if tag == "" {
+				tag = field.Name
 			}
 			isString := field.Type.Kind() == reflect.String
 			if isString != stringPass {
