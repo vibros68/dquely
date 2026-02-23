@@ -107,3 +107,23 @@ func (u *UserLack) DgraphType() string {
 func (u *UserDgraph) DgraphType() string {
 	return "User"
 }
+
+type UserFieldBuilder struct {
+	Uid   string `dquely:"uid"`
+	Name  string `dquely:"name"`
+	Age   int
+	Roles map[string]int `dquely:"roles,json"`
+}
+
+func (u *UserFieldBuilder) DgraphType() string {
+	return "User"
+}
+
+const userFieldBuilderMutationMock = `{
+  set {
+    _:user <name> "Alice" .
+    _:user <roles> "{\"company\":2,\"user\":1}" .
+    _:user <Age> "29" .
+    _:user <dgraph.type> "User" .
+  }
+}`

@@ -1,6 +1,7 @@
 package dquely
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -31,18 +32,16 @@ func Mutation(input any) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("{\n  set {\n")
 
-	// Strings first, then other kinds — each in struct declaration order.
+	// Strings and json-encoded fields first, then other kinds — each in struct declaration order.
 	for _, stringPass := range []bool{true, false} {
 		for i := 0; i < t.NumField(); i++ {
 			field := t.Field(i)
-			tag := field.Tag.Get("dquely")
-			if tag == "-" {
+			rawTag := field.Tag.Get("dquely")
+			if rawTag == "-" {
 				continue
 			}
-			if tag == "" {
-				tag = field.Name
-			}
-			isString := field.Type.Kind() == reflect.String
+			predicate, isJSON := parseTag(rawTag, field.Name)
+			isString := field.Type.Kind() == reflect.String || isJSON
 			if isString != stringPass {
 				continue
 			}
@@ -50,7 +49,17 @@ func Mutation(input any) (string, error) {
 			if val.IsZero() {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("    %s <%s> \"%v\" .\n", blankNode, tag, val.Interface()))
+			var valueStr string
+			if isJSON {
+				b, err := json.Marshal(val.Interface())
+				if err != nil {
+					return "", fmt.Errorf("dquely: failed to marshal field %s as JSON: %w", field.Name, err)
+				}
+				valueStr = strings.ReplaceAll(string(b), `"`, `\"`)
+			} else {
+				valueStr = fmt.Sprintf("%v", val.Interface())
+			}
+			sb.WriteString(fmt.Sprintf("    %s <%s> \"%s\" .\n", blankNode, predicate, valueStr))
 		}
 	}
 
@@ -61,6 +70,25 @@ func Mutation(input any) (string, error) {
 
 type DgraphMutation interface {
 	DgraphType() string
+}
+
+// parseTag splits a raw dquely struct tag into the predicate name and options.
+// Falls back to fieldName when the name part is empty.
+// Returns isJSON=true when the "json" option is present.
+func parseTag(rawTag, fieldName string) (predicate string, isJSON bool) {
+	predicate = rawTag
+	if idx := strings.Index(rawTag, ","); idx >= 0 {
+		predicate = rawTag[:idx]
+		for _, opt := range strings.Split(rawTag[idx+1:], ",") {
+			if opt == "json" {
+				isJSON = true
+			}
+		}
+	}
+	if predicate == "" {
+		predicate = fieldName
+	}
+	return
 }
 
 // Upsert generates a DGraph upsert block that first queries for a node using matchExpr

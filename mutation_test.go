@@ -61,6 +61,21 @@ func TestUpsertWithQuery(t *testing.T) {
 	}
 }
 
+func TestMutationUserFieldBuilder(t *testing.T) {
+	user := &UserFieldBuilder{
+		Name:  "Alice",
+		Age:   29,
+		Roles: map[string]int{"company": 2, "user": 1},
+	}
+	result, err := dquely.Mutation(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != userFieldBuilderMutationMock {
+		t.Errorf("expected Mutation() to return %s, got %s", userFieldBuilderMutationMock, result)
+	}
+}
+
 func TestMutationUserLack(t *testing.T) {
 	user := &UserLack{Name: "Alice", Age: 29, Email: "alice@example.com"}
 	result, err := dquely.Mutation(user)
