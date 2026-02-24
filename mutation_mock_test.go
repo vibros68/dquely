@@ -77,6 +77,12 @@ type User struct {
 	Email string `dquely:"email"`
 }
 
+// UserNoUID intentionally omits a dquely:"uid" field for error-path tests.
+type UserNoUID struct {
+	Name  string `dquely:"name"`
+	Email string `dquely:"email"`
+}
+
 type UserDgraph struct {
 	Uid   string `dquely:"uid"`
 	Name  string `dquely:"name"`
@@ -127,3 +133,85 @@ const userFieldBuilderMutationMock = `{
     _:user <dgraph.type> "User" .
   }
 }`
+
+type UserWithUnique struct {
+	Uid      string `dquely:"uid"`
+	UserName string `dquely:"userName,unique"`
+	Email    string `dquely:"email,unique"`
+	Age      int    `dquely:"age"`
+}
+
+func (u *UserWithUnique) DgraphType() string {
+	return "User"
+}
+
+const userWithUniqueMutationMock = `_:user <userName> "alice" .
+_:user <email> "alice@example.com" .
+_:user <age> "29" .
+_:user <dgraph.type> "User" .`
+
+const userWithUniqueMutationFullMock = `{
+  set {
+    _:user <userName> "alice" .
+    _:user <email> "alice@example.com" .
+    _:user <age> "29" .
+    _:user <dgraph.type> "User" .
+  }
+}`
+
+const userUniqueSingleQuery = `{
+  v as var(func: type(User))
+    @filter(eq(userName, "alice") OR eq(email, "alice@example.com"))
+}`
+
+const userUniqueCondMock = `@if(eq(len(v), 0))`
+const userUniqueWithUidCondMock = `@if(eq(len(v), 0) AND eq(len(u), 1))`
+
+const userUniqueLackingSingleQuery = `{
+  v as var(func: type(User))
+    @filter(eq(userName, "alice"))
+}`
+
+const userWithUniqueLackingMutationMock = `_:user <userName> "alice" .
+_:user <age> "29" .
+_:user <dgraph.type> "User" .`
+
+const userUniqueSingleWithUidQuery = `{
+  u as var(func: uid(0x1)) @filter(type(User))
+
+  v as var(func: type(User))
+	@filter(
+	  (eq(userName, "alice") OR eq(email, "alice@example.com"))
+	  AND NOT uid(0x1)
+	)
+}`
+
+const userUniqueLackingSingleWithUidQuery = `{
+  u as var(func: uid(0x1)) @filter(type(User))
+
+  v as var(func: type(User))
+    @filter(
+      eq(userName, "alice") AND NOT uid(0x1)
+    )
+}`
+
+const userUniqueLackingWithUidSquads = `<0x1> <userName> "alice" .
+<0x1> <email> "alice@example.com" .`
+
+const userUniqueWithUidSquads = `<0x1> <userName> "alice" .
+<0x1> <email> "alice@example.com" .
+<0x1> <age> "29" .`
+
+const userUniqueDelMultiSquads = `<0x1> <age> * .
+<0x1> <email> * .`
+
+type ShortUser struct {
+	Uid  string `dquely:"uid"`
+	Name string `dquely:"name"`
+}
+type Company struct {
+	Uid    string      `dquely:"uid"`
+	Name   string      `dquely:"name"`
+	Owner  *ShortUser  `dquely:"owner"`
+	Staffs []ShortUser `dquely:"staffs"`
+}

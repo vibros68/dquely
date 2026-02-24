@@ -5,6 +5,11 @@ import (
 	"strings"
 )
 
+type DgFilter interface {
+	Query() string
+	DgraphKey() string
+}
+
 // FilterExpr is a standalone filter expression for use with Or().
 type FilterExpr struct {
 	expr string
@@ -115,7 +120,7 @@ func ExpandAllBlock(fields ...string) *DQuely {
 	for i, f := range fields {
 		args[i] = f
 	}
-	return New().Select(args...).As(ExpandAll).Inline()
+	return NewDQL("").Select(args...).As(ExpandAll).Inline()
 }
 
 // renderKey renders the left operand of a comparison: predicate name or FilterExpr (val/count).
@@ -154,23 +159,29 @@ type filter struct {
 }
 
 type DQuely struct {
+	dgKey        string   // block name used by Query(); also returned by DgraphKey()
 	name         string   // set when used as a nested select element via As()
 	isVar        bool     // renders as "var(func: ...)" block in Build
 	condVar      string   // condition statement: "condVar as name(func: ...)" with no body
 	blockVarName string   // variable prefix on the block itself: "blockVarName as var(func: ...) { ... }"
 	varName      string   // variable assignment on nested select: "varName as name { ... }"
-	queryArgs []string // ordering/extra args for root and nested: "orderdesc: ...", "orderasc: ..."
-	firstN    *int     // first: N — combined with queryArgs+offsetN into one field "(args)" group
-	offsetN   *int     // offset: N — combined with queryArgs+firstN into one field "(args)" group
-	inline    bool     // render nested select on one line: "name { field1 field2 }"
-	cascade   bool     // adds @cascade directive before @filter / {
-	groupBy   string   // adds @groupby(field) directive
-	selects   []any
-	filters   []filter
+	queryArgs    []string // ordering/extra args for root and nested: "orderdesc: ...", "orderasc: ..."
+	firstN       *int     // first: N — combined with queryArgs+offsetN into one field "(args)" group
+	offsetN      *int     // offset: N — combined with queryArgs+firstN into one field "(args)" group
+	inline       bool     // render nested select on one line: "name { field1 field2 }"
+	cascade      bool     // adds @cascade directive before @filter / {
+	groupBy      string   // adds @groupby(field) directive
+	selects      []any
+	filters      []filter
 }
 
-func New() *DQuely {
-	return &DQuely{}
+func NewDQL(dgKey string) *DQuely {
+	return &DQuely{dgKey: dgKey}
+}
+
+// DgraphKey returns the block name used by Query() and for JSON response parsing.
+func (d *DQuely) DgraphKey() string {
+	return d.dgKey
 }
 
 // NewVar creates a DGraph var block: var(func: ...) { ... }.
@@ -554,11 +565,11 @@ func (d *DQuely) renderBlock(sb *strings.Builder, blockName string) {
 	sb.WriteString("  }\n")
 }
 
-// Query builds a single-query DQL string with the given block name.
-func (d *DQuely) Query(wrap string) string {
+// Query builds a single-query DQL string using dgKey as the block name.
+func (d *DQuely) Query() string {
 	var sb strings.Builder
 	sb.WriteString("{\n")
-	d.renderBlock(&sb, wrap)
+	d.renderBlock(&sb, d.dgKey)
 	sb.WriteString("}")
 	return sb.String()
 }
