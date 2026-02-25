@@ -1,6 +1,6 @@
 # dquely
 
-A Go library for building [DGraph Query Language (DQL)](https://dgraph.io/docs/dql/) queries and mutations programmatically.
+A Go library for building [DGraph Query Language (DQL)](https://docs.dgraph.io/dql) queries and mutations programmatically.
 
 ## Installation
 
