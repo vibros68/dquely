@@ -58,12 +58,11 @@ func (d *Dgo) SetSchema(ctx context.Context, schema string) error {
 	return d.DG.Alter(ctx, op)
 }
 
-func (d *Dgo) Mutate(ctx context.Context, data any) error {
-	query, mu, err := ParseMutation(data)
+func (d *Dgo) Mutate(ctx context.Context, data any, deep ...bool) error {
+	query, mu, err := ParseMutation(data, deep...)
 	if err != nil {
 		return fmt.Errorf("dgo: build mutation: %w", err)
 	}
-
 	req := &api.Request{
 		Query:     query,
 		Mutations: mu,
@@ -78,15 +77,15 @@ func (d *Dgo) Mutate(ctx context.Context, data any) error {
 	// blank-node name. Write it back into the struct's dquely:"uid" field.
 	blankNode, err := BlankNodeName(data)
 	if err != nil {
-		return fmt.Errorf("dgo: mutate: %w", err)
+		return fmt.Errorf("dgo: inject node name: %w", err)
 	}
-	if uid, ok := resp.Uids[blankNode]; ok {
-		if err := SetUID(data, uid); err != nil {
-			return fmt.Errorf("dgo: mutate: %w", err)
-		}
-		return nil
+	_, ok := resp.Uids[blankNode]
+	if !ok {
+		// if there isn't node name mean the main node name was not inserted
+		// because duplicate condition was not matched
+		return fmt.Errorf("mutate failed: duplicated")
 	}
-	return fmt.Errorf("mutate failed: duplicated")
+	return SetUIDs(data, resp.Uids)
 }
 
 type Query[T any] struct {

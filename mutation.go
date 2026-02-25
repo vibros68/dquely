@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/dgraph-io/dgo/v250/protos/api"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -170,6 +171,78 @@ func BlankNodeName(input any) (string, error) {
 		typeName = dm.DgraphType()
 	}
 	return strings.ToLower(typeName), nil
+}
+
+// SetUIDs distributes UIDs from a DGraph mutation response into a struct and its
+// direct nested structs.  The keys in uids are matched as follows:
+//
+//   - A nested pointer-to-struct field is matched by strings.ToLower(field.Name).
+//   - A nested slice-of-struct element at index j is matched by
+//     strings.ToLower(field.Name) + strconv.Itoa(j).
+//   - Any key that does not match a field pattern is assumed to be the root struct's
+//     UID and is applied via SetUID.
+//
+// input must be a non-nil pointer to a struct with a dquely:"uid" field.
+func SetUIDs(input any, uids map[string]string) error {
+	v := reflect.ValueOf(input)
+	t := reflect.TypeOf(input)
+	if v.Kind() != reflect.Ptr {
+		return fmt.Errorf("dquely: SetUIDs expects a pointer to struct, got %s", v.Kind())
+	}
+	v = v.Elem()
+	t = t.Elem()
+	if v.Kind() != reflect.Struct {
+		return fmt.Errorf("dquely: SetUIDs expects a pointer to struct, got pointer to %s", v.Kind())
+	}
+
+	matched := make(map[string]bool, len(uids))
+
+	// Match nested pointer and slice fields by lowercase field name.
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		fv := v.Field(i)
+		ft := field.Type
+		fieldKey := strings.ToLower(field.Name)
+
+		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct {
+			if uid, ok := uids[fieldKey]; ok {
+				matched[fieldKey] = true
+				if !fv.IsNil() {
+					if err := SetUID(fv.Interface(), uid); err != nil {
+						return err
+					}
+				}
+			}
+		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
+			if fv.IsNil() {
+				continue
+			}
+			for j := 0; j < fv.Len(); j++ {
+				key := fieldKey + strconv.Itoa(j)
+				if uid, ok := uids[key]; ok {
+					matched[key] = true
+					elem := fv.Index(j)
+					if elem.CanAddr() {
+						if err := SetUID(elem.Addr().Interface(), uid); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Any key not matched by a field is treated as the root struct's UID.
+	for key, uid := range uids {
+		if !matched[key] {
+			if err := SetUID(input, uid); err != nil {
+				return err
+			}
+			break
+		}
+	}
+
+	return nil
 }
 
 // SetUID writes uid into the field tagged `dquely:"uid"` on the struct that input
@@ -411,19 +484,36 @@ func UpsertWithQuery(queryName string, q *DQuely, varRef string, input any, upda
 	return sb.String(), nil
 }
 
+// structUID returns the value of the dquely:"uid" field in v, or "" if absent.
+func structUID(v reflect.Value, t reflect.Type) string {
+	for i := 0; i < t.NumField(); i++ {
+		predicate, _, _ := parseTag(t.Field(i).Tag.Get("dquely"), t.Field(i).Name)
+		if predicate == "uid" {
+			return v.Field(i).String()
+		}
+	}
+	return ""
+}
+
 // buildNquads writes raw N-quad lines for v into sb.
-// Primitive fields are written first (strings/json pass, then others), then dgraph.type.
-// In deep mode, nested pointer-to-struct and slice-of-struct fields are collected and
-// emitted as blank-node references, followed by their recursive content.
+// For each node the output order is:
+//  1. Primitive fields (strings/json first, then other scalars), each ending with ".\n".
+//  2. All nested-struct references (uid-based <uid> or blank-node _:x), each ending with ".\n".
+//  3. dgraph.type triple (no trailing newline).
+//  4. Recursive content for blank-node children, each preceded by "\n".
+//
+// When a nested struct has a non-empty uid its reference is "<uid>" and no content is emitted
+// (the node already exists in DGraph).
 func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode, typeName string, deep bool) error {
 	type nestedItem struct {
-		blankNode string
-		v         reflect.Value
-		t         reflect.Type
-		typeName  string
-		predicate string
+		ref         string // "<uid>" for existing nodes, "_:predicate" for new blank nodes
+		blankNode   string // blank node name, only used when !skipContent
+		v           reflect.Value
+		t           reflect.Type
+		typeName    string
+		predicate   string
+		skipContent bool // true when nested struct already has a uid
 	}
-	var nestedItems []nestedItem
 
 	// Two passes: strings/json first, then non-string primitives (nested structs skipped).
 	for _, stringPass := range []bool{true, false} {
@@ -464,66 +554,87 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 		}
 	}
 
+	// Collect nested items in field declaration order (only in deep mode).
+	var nestedItems []nestedItem
+	if deep {
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			rawTag := field.Tag.Get("dquely")
+			if rawTag == "-" {
+				continue
+			}
+			predicate, _, _ := parseTag(rawTag, field.Name)
+			if predicate == "uid" {
+				continue
+			}
+			ft := field.Type
+			fv := v.Field(i)
+
+			if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct {
+				if fv.IsNil() {
+					continue
+				}
+				childV := fv.Elem()
+				childT := ft.Elem()
+				if uid := structUID(childV, childT); uid != "" {
+					nestedItems = append(nestedItems, nestedItem{
+						ref:         fmt.Sprintf("<%s>", uid),
+						predicate:   predicate,
+						skipContent: true,
+					})
+				} else {
+					bn := "_:" + predicate
+					nestedItems = append(nestedItems, nestedItem{
+						ref:       bn,
+						blankNode: bn,
+						v:         childV,
+						t:         childT,
+						typeName:  childT.Name(),
+						predicate: predicate,
+					})
+				}
+			} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
+				if fv.IsNil() || fv.Len() == 0 {
+					continue
+				}
+				childT := ft.Elem()
+				for j := 0; j < fv.Len(); j++ {
+					childV := fv.Index(j)
+					if uid := structUID(childV, childT); uid != "" {
+						nestedItems = append(nestedItems, nestedItem{
+							ref:         fmt.Sprintf("<%s>", uid),
+							predicate:   predicate,
+							skipContent: true,
+						})
+					} else {
+						bn := fmt.Sprintf("_:%s%d", predicate, j)
+						nestedItems = append(nestedItems, nestedItem{
+							ref:       bn,
+							blankNode: bn,
+							v:         childV,
+							t:         childT,
+							typeName:  childT.Name(),
+							predicate: predicate,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// All nested refs go before dgraph.type (uid-based and blank-node alike).
+	for _, item := range nestedItems {
+		sb.WriteString(fmt.Sprintf("%s <%s> %s .\n", blankNode, item.predicate, item.ref))
+	}
+
+	// dgraph.type is always the last triple for this node.
 	sb.WriteString(fmt.Sprintf("%s <dgraph.type> \"%s\" .", blankNode, typeName))
 
-	if !deep {
-		return nil
-	}
-
-	// Collect nested items in field declaration order.
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		rawTag := field.Tag.Get("dquely")
-		if rawTag == "-" {
+	// Emit recursive content for blank-node children.
+	for _, item := range nestedItems {
+		if item.skipContent {
 			continue
 		}
-		predicate, _, _ := parseTag(rawTag, field.Name)
-		if predicate == "uid" {
-			continue
-		}
-		ft := field.Type
-		fv := v.Field(i)
-
-		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct {
-			if fv.IsNil() {
-				continue
-			}
-			childT := ft.Elem()
-			nestedItems = append(nestedItems, nestedItem{
-				blankNode: "_:" + predicate,
-				v:         fv.Elem(),
-				t:         childT,
-				typeName:  childT.Name(),
-				predicate: predicate,
-			})
-		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-			if fv.IsNil() || fv.Len() == 0 {
-				continue
-			}
-			childT := ft.Elem()
-			for j := 0; j < fv.Len(); j++ {
-				nestedItems = append(nestedItems, nestedItem{
-					blankNode: fmt.Sprintf("_:%s%d", predicate, j),
-					v:         fv.Index(j),
-					t:         childT,
-					typeName:  childT.Name(),
-					predicate: predicate,
-				})
-			}
-		}
-	}
-
-	if len(nestedItems) == 0 {
-		return nil
-	}
-
-	// Emit all blank-node references first.
-	for _, item := range nestedItems {
-		sb.WriteString(fmt.Sprintf("\n%s <%s> %s .", blankNode, item.predicate, item.blankNode))
-	}
-
-	// Emit nested content in the same order.
-	for _, item := range nestedItems {
 		sb.WriteString("\n")
 		if err := buildNquads(sb, item.v, item.t, item.blankNode, item.typeName, true); err != nil {
 			return err
@@ -617,38 +728,76 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 
 	isDeep := len(deep) > 0 && deep[0]
 
-	// Case A: No unique fields.
-	if len(uniqueFields) == 0 {
-		// Detect if any field is a nested struct (pointer or slice).
-		hasNested := false
-		for i := 0; i < t.NumField(); i++ {
-			rawTag := t.Field(i).Tag.Get("dquely")
-			if rawTag == "-" {
-				continue
-			}
-			ft := t.Field(i).Type
-			if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
-				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) {
-				hasNested = true
-				break
-			}
+	// Structs with nested pointer-to-struct or slice-of-struct fields always use the
+	// buildNquads path regardless of unique fields.  Uniqueness for such structs must be
+	// enforced by the caller (the nested graph is mutated atomically).
+	hasNested := false
+	for i := 0; i < t.NumField(); i++ {
+		rawTag := t.Field(i).Tag.Get("dquely")
+		if rawTag == "-" {
+			continue
 		}
-
-		if !hasNested {
-			// No nested structs — delegate to Mutation() for backwards-compatible output.
-			mutStr, err := Mutation(input)
-			if err != nil {
-				return "", nil, err
-			}
-			return "", []*api.Mutation{{SetNquads: []byte(mutStr)}}, nil
+		ft := t.Field(i).Type
+		if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
+			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) {
+			hasNested = true
+			break
 		}
-
-		// Has nested structs — generate raw N-quads with optional deep rendering.
+	}
+	if hasNested {
 		var sb strings.Builder
 		if err := buildNquads(&sb, v, t, blankNode, typeName, isDeep); err != nil {
 			return "", nil, err
 		}
-		return "", []*api.Mutation{{SetNquads: []byte(sb.String())}}, nil
+		nquads := []byte(sb.String())
+
+		// No unique fields: plain insert, no query/condition needed.
+		if len(uniqueFields) == 0 {
+			return "", []*api.Mutation{{SetNquads: nquads}}, nil
+		}
+
+		// Has unique fields and uid is empty (nested Case B): generate query+condition
+		// for duplicate prevention while using the deep N-quads as the mutation body.
+		if uid == "" {
+			var nonZeroUniques []fieldMeta
+			for _, f := range uniqueFields {
+				if !v.Field(f.index).IsZero() {
+					nonZeroUniques = append(nonZeroUniques, f)
+				}
+			}
+			var qb strings.Builder
+			qb.WriteString("{\n")
+			qb.WriteString(fmt.Sprintf("  v as var(func: type(%s))\n    @filter(", typeName))
+			for i, f := range nonZeroUniques {
+				if i > 0 {
+					qb.WriteString(" OR ")
+				}
+				val := fmt.Sprintf("%v", v.Field(f.index).Interface())
+				qb.WriteString(fmt.Sprintf("eq(%s, \"%s\")", f.predicate, val))
+			}
+			if isDeep {
+				qb.WriteString(")\n}\n")
+			} else {
+				qb.WriteString(")\n}")
+			}
+			mu := &api.Mutation{
+				SetNquads: nquads,
+				Cond:      "@if(eq(len(v), 0))",
+			}
+			return qb.String(), []*api.Mutation{mu}, nil
+		}
+
+		// uid is non-empty: uid-based update, no duplicate query needed.
+		return "", []*api.Mutation{{SetNquads: nquads}}, nil
+	}
+
+	// Case A: No unique fields, no nested structs — delegate to Mutation().
+	if len(uniqueFields) == 0 {
+		mutStr, err := Mutation(input)
+		if err != nil {
+			return "", nil, err
+		}
+		return "", []*api.Mutation{{SetNquads: []byte(mutStr)}}, nil
 	}
 
 	// Non-zero unique fields used for query filter.
@@ -685,7 +834,11 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 			val := fmt.Sprintf("%v", v.Field(f.index).Interface())
 			qb.WriteString(fmt.Sprintf("eq(%s, \"%s\")", f.predicate, val))
 		}
-		qb.WriteString(")\n}")
+		if isDeep {
+			qb.WriteString(")\n}\n")
+		} else {
+			qb.WriteString(")\n}")
+		}
 
 		// Build raw N-quads: two passes (strings/json first, then others).
 		var sb strings.Builder
@@ -707,9 +860,10 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 			}
 		}
 		sb.WriteString(fmt.Sprintf("%s <dgraph.type> \"%s\" .", blankNode, typeName))
+		nquads := []byte(sb.String())
 
 		mu := &api.Mutation{
-			SetNquads: []byte(sb.String()),
+			SetNquads: nquads,
 			Cond:      "@if(eq(len(v), 0))",
 		}
 		return qb.String(), []*api.Mutation{mu}, nil

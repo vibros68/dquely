@@ -141,6 +141,32 @@ func TestUniqueFieldsPointer(t *testing.T) {
 	if fields[1].Predicate != "email" || fields[1].Value != "bob@example.com" {
 		t.Errorf("unexpected second unique field: %+v", fields[1])
 	}
+	query, muConds, err := dquely.ParseMutation(user, true)
+	if err != nil {
+		t.Fatalf("expected error to be nil, got %s", err)
+	}
+	const expectedQuery = `{
+  v as var(func: type(User))
+    @filter(eq(userName, "bob") OR eq(email, "bob@example.com"))
+}
+`
+	if query != expectedQuery {
+		t.Fatalf("expected ParseMutation() to get query be %s, got %s", expectedQuery, query)
+	}
+	var cond = muConds[0]
+	const expectedCond = `@if(eq(len(v), 0))`
+	if cond.Cond != expectedCond {
+		t.Fatalf("expected ParseMutation() to get Condition be %s, got %s", expectedCond, cond.Cond)
+	}
+	const expectedSet = `_:user <userName> "bob" .
+_:user <email> "bob@example.com" .
+_:user <dgraph.type> "User" .`
+	if string(cond.SetNquads) != expectedSet {
+		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedSet, string(cond.SetNquads))
+	}
+	if string(cond.DelNquads) != "" {
+		t.Errorf("expected ParseMutation() to get Mutation be empty, got %s", string(cond.SetNquads))
+	}
 }
 
 func TestUniqueFieldsNone(t *testing.T) {
@@ -461,10 +487,80 @@ func TestDeepMutation(t *testing.T) {
 		t.Fatalf("expected ParseMutation() to get Condition be empty, got %s", cond.Cond)
 	}
 	const expectedSet = `_:company <name> "A" .
-_:company <dgraph.type> "Company" .
 _:company <owner> _:owner .
+_:company <dgraph.type> "Company" .
 _:owner <name> "U" .
 _:owner <dgraph.type> "ShortUser" .`
+	if string(cond.SetNquads) != expectedSet {
+		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedSet, string(cond.SetNquads))
+	}
+	if string(cond.DelNquads) != "" {
+		t.Errorf("expected ParseMutation() to get Mutation be empty, got %s", string(cond.SetNquads))
+	}
+}
+
+func TestDeepWithUidMutation(t *testing.T) {
+	var company = Company{
+		Name: "A",
+		Owner: &ShortUser{
+			Uid: "0x1",
+		},
+	}
+	query, muConds, err := dquely.ParseMutation(&company, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(muConds) != 1 {
+		t.Fatalf("expected 1 condition, got %d", len(muConds))
+	}
+	if query != "" {
+		t.Fatalf("expected ParseMutation() to get query be empty, got %s", query)
+	}
+	var cond = muConds[0]
+	if cond.Cond != "" {
+		t.Fatalf("expected ParseMutation() to get Condition be empty, got %s", cond.Cond)
+	}
+	const expectedSet = `_:company <name> "A" .
+_:company <owner> <0x1> .
+_:company <dgraph.type> "Company" .`
+	if string(cond.SetNquads) != expectedSet {
+		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedSet, string(cond.SetNquads))
+	}
+	if string(cond.DelNquads) != "" {
+		t.Errorf("expected ParseMutation() to get Mutation be empty, got %s", string(cond.SetNquads))
+	}
+}
+
+func TestDeepMultiWithUidMutation(t *testing.T) {
+	var company = Company{
+		Name: "A",
+		Owner: &ShortUser{
+			Uid: "0x1",
+		},
+		Staffs: []ShortUser{
+			{Uid: "0x2"},
+			{Uid: "0x3"},
+		},
+	}
+	query, muConds, err := dquely.ParseMutation(&company, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(muConds) != 1 {
+		t.Fatalf("expected 1 condition, got %d", len(muConds))
+	}
+	if query != "" {
+		t.Fatalf("expected ParseMutation() to get query be empty, got %s", query)
+	}
+	var cond = muConds[0]
+	if cond.Cond != "" {
+		t.Fatalf("expected ParseMutation() to get Condition be empty, got %s", cond.Cond)
+	}
+	const expectedSet = `_:company <name> "A" .
+_:company <owner> <0x1> .
+_:company <staffs> <0x2> .
+_:company <staffs> <0x3> .
+_:company <dgraph.type> "Company" .`
 	if string(cond.SetNquads) != expectedSet {
 		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedSet, string(cond.SetNquads))
 	}
@@ -499,10 +595,10 @@ func TestDeepMultiMutation(t *testing.T) {
 		t.Fatalf("expected ParseMutation() to get Condition be empty, got %s", cond.Cond)
 	}
 	const expectedSet = `_:company <name> "A" .
-_:company <dgraph.type> "Company" .
 _:company <owner> _:owner .
 _:company <staffs> _:staffs0 .
 _:company <staffs> _:staffs1 .
+_:company <dgraph.type> "Company" .
 _:owner <name> "U" .
 _:owner <dgraph.type> "ShortUser" .
 _:staffs0 <name> "S1" .
@@ -515,4 +611,67 @@ _:staffs1 <dgraph.type> "ShortUser" .`
 	if string(cond.DelNquads) != "" {
 		t.Errorf("expected ParseMutation() to get Mutation be empty, got %s", string(cond.SetNquads))
 	}
+}
+
+func TestMoreDeepMultiMutation(t *testing.T) {
+	var company = Company{
+		Name: "A",
+		Owner: &ShortUser{
+			Name: "U",
+		},
+		Staffs: []ShortUser{
+			{
+				Name: "S1",
+				Link: &User{Uid: "0x1"},
+			},
+		},
+	}
+	query, muConds, err := dquely.ParseMutation(&company, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(muConds) != 1 {
+		t.Fatalf("expected 1 condition, got %d", len(muConds))
+	}
+	if query != "" {
+		t.Fatalf("expected ParseMutation() to get query be empty, got %s", query)
+	}
+	var cond = muConds[0]
+	if cond.Cond != "" {
+		t.Fatalf("expected ParseMutation() to get Condition be empty, got %s", cond.Cond)
+	}
+	const expectedSet = `_:company <name> "A" .
+_:company <owner> _:owner .
+_:company <staffs> _:staffs0 .
+_:company <dgraph.type> "Company" .
+_:owner <name> "U" .
+_:owner <dgraph.type> "ShortUser" .
+_:staffs0 <name> "S1" .
+_:staffs0 <link> <0x1> .
+_:staffs0 <dgraph.type> "ShortUser" .`
+	if string(cond.SetNquads) != expectedSet {
+		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedSet, string(cond.SetNquads))
+	}
+	if string(cond.DelNquads) != "" {
+		t.Errorf("expected ParseMutation() to get Mutation be empty, got %s", string(cond.SetNquads))
+	}
+	// test SetUIDs
+	err = dquely.SetUIDs(&company, map[string]string{
+		"company": "0x2",
+		"owner":   "0x3",
+		"staffs0": "0x4",
+	})
+	if err != nil {
+		t.Fatalf("dquely.SetUIDs: expect error to be nil got %v", err)
+	}
+	if company.Uid != "0x2" {
+		t.Errorf("expected SetUIDs to set company.Uid = 0x2, got %s", company.Uid)
+	}
+	if company.Owner.Uid != "0x3" {
+		t.Errorf("expected SetUIDs to set company.Owner.Uid = 0x3, got %s", company.Uid)
+	}
+	if company.Staffs[0].Uid != "0x4" {
+		t.Errorf("expected SetUIDs to set company.Staffs[0].Uid = 0x4, got %s", company.Staffs[0].Uid)
+	}
+
 }

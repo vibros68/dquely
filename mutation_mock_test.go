@@ -208,6 +208,7 @@ const userUniqueDelMultiSquads = `<0x1> <age> * .
 type ShortUser struct {
 	Uid  string `dquely:"uid"`
 	Name string `dquely:"name"`
+	Link *User  `dquely:"link"`
 }
 type Company struct {
 	Uid    string      `dquely:"uid"`
