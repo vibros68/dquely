@@ -70,6 +70,10 @@ func Has(field string) FilterExpr {
 	return FilterExpr{expr: fmt.Sprintf("has(%s)", field)}
 }
 
+func Type(typeName any) FilterExpr {
+	return FilterExpr{expr: fmt.Sprintf("type(%v)", typeName)}
+}
+
 func Uid(values ...any) FilterExpr {
 	parts := make([]string, len(values))
 	for i, v := range values {

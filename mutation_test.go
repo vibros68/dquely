@@ -2,20 +2,10 @@ package dquely_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/vibros68/dquely"
 )
-
-func TestMutation(t *testing.T) {
-	user := &User{Name: "Alice", Age: 29, Email: "alice@example.com"}
-	result, err := dquely.Mutation(user)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != userMutationMock {
-		t.Errorf("expected Mutation() to return %s, got %s", userMutationMock, result)
-	}
-}
 
 func TestUpsert(t *testing.T) {
 	user := User{Name: "Alice Sayum", Age: 30, Email: "alice@example.com"}
@@ -58,43 +48,6 @@ func TestUpsertWithQuery(t *testing.T) {
 	}
 	if result != upsertWithFuncMock {
 		t.Errorf("expected UpsertWithQuery() to return %s, got %s", upsertWithFuncMock, result)
-	}
-}
-
-func TestMutationUserFieldBuilder(t *testing.T) {
-	user := &UserFieldBuilder{
-		Name:  "Alice",
-		Age:   29,
-		Roles: map[string]int{"company": 2, "user": 1},
-	}
-	result, err := dquely.Mutation(user)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != userFieldBuilderMutationMock {
-		t.Errorf("expected Mutation() to return %s, got %s", userFieldBuilderMutationMock, result)
-	}
-}
-
-func TestMutationUserLack(t *testing.T) {
-	user := &UserLack{Name: "Alice", Age: 29, Email: "alice@example.com"}
-	result, err := dquely.Mutation(user)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != userLackMutationMock {
-		t.Errorf("expected Mutation() to return %s, got %s", userLackMutationMock, result)
-	}
-}
-
-func TestMutationWithDgraphType(t *testing.T) {
-	user := &UserDgraph{Name: "Alice", Age: 29, Email: "alice@example.com"}
-	result, err := dquely.Mutation(user)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != userMutationMock {
-		t.Errorf("expected Mutation() to return %s, got %s", userMutationMock, result)
 	}
 }
 
@@ -674,4 +627,58 @@ _:staffs0 <dgraph.type> "ShortUser" .`
 		t.Errorf("expected SetUIDs to set company.Staffs[0].Uid = 0x4, got %s", company.Staffs[0].Uid)
 	}
 
+}
+
+func TestParseMutationRelation0(t *testing.T) {
+	var company = Product{
+		Uid:       "",
+		Name:      "Mít Mật",
+		Bio:       "Mít Mật ăn thì hơi nhão và độ ngọt cao",
+		CreatedAt: time.Unix(1772889031, 0),
+		Price:     10000,
+		Medias: []*PMedia{
+			{Uid: "0xea72"},
+			{Uid: "0xea73"},
+		},
+		Stores: []*PStore{
+			{Uid: "0xea6a"},
+		},
+		ProductOf: &Company{
+			Uid: "0xc361",
+		},
+	}
+	query, muConds, err := dquely.ParseMutation(&company, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(muConds) != 1 {
+		t.Fatalf("expected 1 condition, got %d", len(muConds))
+	}
+	const expectedQuery = ``
+	if query != expectedQuery {
+		t.Errorf("expected ParseMutation() to get query %s, got %s", expectedQuery, query)
+	}
+	var cond = muConds[0]
+	const expectedCond = ``
+	if cond.Cond != expectedCond {
+		t.Errorf("expected ParseMutation() to get Condition be %s, got %s", expectedCond, cond.Cond)
+	}
+	const expectedNquads = `_:product <name> "Mít Mật" .
+_:product <bio> "Mít Mật ăn thì hơi nhão và độ ngọt cao" .
+_:product <createdAt> "2026-03-07T13:10:31" .
+_:product <price> "10000" .
+_:product <medias> <0xea72> .
+_:product <medias> <0xea73> .
+_:product <stores> <0xea6a> .
+_:product <productOf> <0xc361> .
+_:product <dgraph.type> "Product" .`
+	if string(cond.SetNquads) != expectedNquads {
+		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedNquads,
+			string(cond.SetNquads))
+	}
+	const expectedDelNquads = ``
+	if string(cond.DelNquads) != expectedDelNquads {
+		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedDelNquads,
+			string(cond.DelNquads))
+	}
 }

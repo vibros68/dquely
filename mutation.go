@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Mutation serializes a struct pointer to a DGraph RDF N-Quad set mutation.
@@ -529,7 +530,8 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 			}
 			ft := field.Type
 			if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
-				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) {
+				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) ||
+				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct) {
 				continue
 			}
 			isString := ft.Kind() == reflect.String || isJSON
@@ -547,6 +549,8 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 					return fmt.Errorf("dquely: failed to marshal field %s as JSON: %w", field.Name, err)
 				}
 				valStr = strings.ReplaceAll(string(b), `"`, `\"`)
+			} else if tv, ok := fv.Interface().(time.Time); ok {
+				valStr = tv.UTC().Format("2006-01-02T15:04:05")
 			} else {
 				valStr = fmt.Sprintf("%v", fv.Interface())
 			}
@@ -618,6 +622,35 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 						})
 					}
 				}
+			} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct {
+				if fv.IsNil() || fv.Len() == 0 {
+					continue
+				}
+				childT := ft.Elem().Elem()
+				for j := 0; j < fv.Len(); j++ {
+					elemPtr := fv.Index(j)
+					if elemPtr.IsNil() {
+						continue
+					}
+					childV := elemPtr.Elem()
+					if uid := structUID(childV, childT); uid != "" {
+						nestedItems = append(nestedItems, nestedItem{
+							ref:         fmt.Sprintf("<%s>", uid),
+							predicate:   predicate,
+							skipContent: true,
+						})
+					} else {
+						bn := fmt.Sprintf("_:%s%d", predicate, j)
+						nestedItems = append(nestedItems, nestedItem{
+							ref:       bn,
+							blankNode: bn,
+							v:         childV,
+							t:         childT,
+							typeName:  childT.Name(),
+							predicate: predicate,
+						})
+					}
+				}
 			}
 		}
 	}
@@ -642,6 +675,85 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 	}
 
 	return nil
+}
+
+// findUniquenessQuery recursively walks every nested struct field (both pointer-to-struct
+// and slice-of-struct) and returns the first DGraph query block (variable "v") for a
+// struct that has no uid but has at least one non-zero unique field.
+// Returns an empty string when no such struct is found at any depth.
+func findUniquenessQuery(v reflect.Value, t reflect.Type) string {
+	for i := 0; i < t.NumField(); i++ {
+		rawTag := t.Field(i).Tag.Get("dquely")
+		if rawTag == "-" {
+			continue
+		}
+		ft := t.Field(i).Type
+		fv := v.Field(i)
+
+		// Collect all child struct values for this field.
+		type child struct {
+			v reflect.Value
+			t reflect.Type
+		}
+		var children []child
+		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct {
+			if !fv.IsNil() {
+				children = append(children, child{fv.Elem(), ft.Elem()})
+			}
+		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
+			childT := ft.Elem()
+			for j := 0; j < fv.Len(); j++ {
+				children = append(children, child{fv.Index(j), childT})
+			}
+		}
+
+		for _, c := range children {
+			if structUID(c.v, c.t) != "" {
+				continue // existing node — no insert query needed
+			}
+
+			// Collect non-zero unique fields on this child.
+			childTypeName := c.t.Name()
+			var nonZeroUniques []struct {
+				index     int
+				predicate string
+			}
+			for j := 0; j < c.t.NumField(); j++ {
+				rawChildTag := c.t.Field(j).Tag.Get("dquely")
+				if rawChildTag == "-" {
+					continue
+				}
+				pred, _, isUniq := parseTag(rawChildTag, c.t.Field(j).Name)
+				if pred == "uid" || !isUniq || c.v.Field(j).IsZero() {
+					continue
+				}
+				nonZeroUniques = append(nonZeroUniques, struct {
+					index     int
+					predicate string
+				}{j, pred})
+			}
+
+			if len(nonZeroUniques) > 0 {
+				var qb strings.Builder
+				qb.WriteString("{\n")
+				qb.WriteString(fmt.Sprintf("  v as var(func: type(%s))\n    @filter(", childTypeName))
+				for k, f := range nonZeroUniques {
+					if k > 0 {
+						qb.WriteString(" OR ")
+					}
+					qb.WriteString(fmt.Sprintf("eq(%s, \"%v\")", f.predicate, c.v.Field(f.index).Interface()))
+				}
+				qb.WriteString(")\n}\n")
+				return qb.String()
+			}
+
+			// No unique fields on this child — recurse into its nested fields.
+			if q := findUniquenessQuery(c.v, c.t); q != "" {
+				return q
+			}
+		}
+	}
+	return ""
 }
 
 // ParseMutation inspects input (a non-nil pointer to a struct with a dquely:"uid" field)
@@ -739,7 +851,8 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 		}
 		ft := t.Field(i).Type
 		if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
-			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) {
+			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) ||
+			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct) {
 			hasNested = true
 			break
 		}
@@ -751,8 +864,17 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 		}
 		nquads := []byte(sb.String())
 
-		// No unique fields: plain insert, no query/condition needed.
+		// No unique fields on root: recursively search nested fields for unique fields.
 		if len(uniqueFields) == 0 {
+			if isDeep {
+				if q := findUniquenessQuery(v, t); q != "" {
+					mu := &api.Mutation{
+						SetNquads: nquads,
+						Cond:      "@if(eq(len(v), 0))",
+					}
+					return q, []*api.Mutation{mu}, nil
+				}
+			}
 			return "", []*api.Mutation{{SetNquads: nquads}}, nil
 		}
 
@@ -791,13 +913,13 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 		return "", []*api.Mutation{{SetNquads: nquads}}, nil
 	}
 
-	// Case A: No unique fields, no nested structs — delegate to Mutation().
+	// Case A: No unique fields, no nested structs — raw N-quads, no condition.
 	if len(uniqueFields) == 0 {
-		mutStr, err := Mutation(input)
+		nquads, err := rawNquads(v, t, "uid(v)", nil)
 		if err != nil {
 			return "", nil, err
 		}
-		return "", []*api.Mutation{{SetNquads: []byte(mutStr)}}, nil
+		return "", []*api.Mutation{{SetNquads: nquads}}, nil
 	}
 
 	// Non-zero unique fields used for query filter.
@@ -947,4 +1069,196 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 		Cond:      "@if(eq(len(v), 0) AND eq(len(u), 1))",
 	}
 	return qb.String(), []*api.Mutation{mu}, nil
+}
+
+const FieldAll = "_all_"
+
+// formatFieldValue returns the DQL literal representation of a struct field value.
+// All values are wrapped in double quotes. JSON fields are json-encoded first.
+// time.Time values are formatted as RFC3339 in UTC without timezone suffix.
+func formatFieldValue(fv reflect.Value, ft reflect.Type, isJSON bool) (string, error) {
+	if isJSON {
+		b, err := json.Marshal(fv.Interface())
+		if err != nil {
+			return "", err
+		}
+		return `"` + strings.ReplaceAll(string(b), `"`, `\"`) + `"`, nil
+	}
+	if t, ok := fv.Interface().(time.Time); ok {
+		return `"` + t.UTC().Format("2006-01-02T15:04:05") + `"`, nil
+	}
+	return `"` + fmt.Sprintf("%v", fv.Interface()) + `"`, nil
+}
+
+// rawNquads builds raw N-quad lines for the given struct value in declaration order.
+// Fields are formatted with native types (strings quoted, scalars unquoted).
+// No dgraph.type triple is appended.
+// When fieldSet is non-nil, only fields whose predicate is a key in fieldSet are included.
+func rawNquads(v reflect.Value, t reflect.Type, blankNode string, fieldSet map[string]bool) ([]byte, error) {
+	var sb strings.Builder
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		rawTag := field.Tag.Get("dquely")
+		if rawTag == "-" {
+			continue
+		}
+		predicate, isJSON, _ := parseTag(rawTag, field.Name)
+		if predicate == "uid" {
+			continue
+		}
+		if fieldSet != nil && !fieldSet[predicate] {
+			continue
+		}
+		ft := field.Type
+		if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
+			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		val, err := formatFieldValue(fv, ft, isJSON)
+		if err != nil {
+			return nil, fmt.Errorf("dquely: field %s: %w", field.Name, err)
+		}
+		sb.WriteString(fmt.Sprintf("%s <%s> %s .\n", blankNode, predicate, val))
+	}
+	return []byte(strings.TrimRight(sb.String(), "\n")), nil
+}
+
+// ParseUpdate generates a DGraph conditional-mutation query and api.Mutation for
+// updating an existing node identified by its uid field. The struct must have a
+// non-empty field tagged dquely:"uid".
+//
+// Pass FieldAll ("_all_") to include all non-uid, non-zero fields in the update.
+// Pass one or more predicate names to limit the update to those specific fields.
+//
+// The returned query string is wrapped in a "{}" block, suitable for use directly
+// in an api.Request. The mutation carries:
+//   - SetNquads: scalar values as typed literals; relationship fields as <uid> references.
+//   - DelNquads: a wildcard delete for every relationship field that was requested, so
+//     stale edges are cleared before the new references are written.
+//   - Cond: "@if(eq(len(v), 1))" — only fires when exactly one node matches the uid
+func ParseUpdate(input any, fields ...string) (string, []*api.Mutation, error) {
+	v := reflect.ValueOf(input)
+	t := reflect.TypeOf(input)
+	if v.Kind() != reflect.Ptr {
+		return "", nil, fmt.Errorf("dquely: ParseUpdate expects a pointer to struct, got %s", v.Kind())
+	}
+	v = v.Elem()
+	t = t.Elem()
+	if v.Kind() != reflect.Struct {
+		return "", nil, fmt.Errorf("dquely: ParseUpdate expects a pointer to struct, got pointer to %s", v.Kind())
+	}
+	if !hasUIDField(t) {
+		return "", nil, fmt.Errorf("dquely: ParseUpdate requires a field tagged dquely:\"uid\" in the struct")
+	}
+
+	typeName := t.Name()
+	if dm, ok := input.(DgraphMutation); ok {
+		typeName = dm.DgraphType()
+	}
+	uid := ""
+	for i := 0; i < t.NumField(); i++ {
+		predicate, _, _ := parseTag(t.Field(i).Tag.Get("dquely"), t.Field(i).Name)
+		if predicate == "uid" {
+			uid = v.Field(i).String()
+			break
+		}
+	}
+	if uid == "" {
+		return "", nil, fmt.Errorf("dquely: ParseUpdate requires a non-empty uid field")
+	}
+
+	var fieldSet map[string]bool
+	if !(len(fields) == 1 && fields[0] == FieldAll) {
+		fieldSet = make(map[string]bool, len(fields))
+		for _, f := range fields {
+			fieldSet[f] = true
+		}
+	}
+
+	// Single pass in struct declaration order.
+	// Primitive fields go to setSB; relationship fields produce uid-references in setSB
+	// and a wildcard delete in delSB.
+	var setSB, delSB strings.Builder
+	firstSet, firstDel := true, true
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		rawTag := field.Tag.Get("dquely")
+		if rawTag == "-" {
+			continue
+		}
+		predicate, isJSON, _ := parseTag(rawTag, field.Name)
+		if predicate == "uid" {
+			continue
+		}
+		if fieldSet != nil && !fieldSet[predicate] {
+			continue
+		}
+		ft := field.Type
+		fv := v.Field(i)
+
+		appendSet := func(s string) {
+			if !firstSet {
+				setSB.WriteByte('\n')
+			}
+			setSB.WriteString(s)
+			firstSet = false
+		}
+		appendDel := func(s string) {
+			if !firstDel {
+				delSB.WriteByte('\n')
+			}
+			delSB.WriteString(s)
+			firstDel = false
+		}
+
+		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct {
+			if !fv.IsNil() {
+				if childUID := structUID(fv.Elem(), ft.Elem()); childUID != "" {
+					appendSet(fmt.Sprintf("uid(v) <%s> <%s> .", predicate, childUID))
+				}
+			}
+			appendDel(fmt.Sprintf("uid(v) <%s> * .", predicate))
+		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
+			childT := ft.Elem()
+			for j := 0; j < fv.Len(); j++ {
+				if childUID := structUID(fv.Index(j), childT); childUID != "" {
+					appendSet(fmt.Sprintf("uid(v) <%s> <%s> .", predicate, childUID))
+				}
+			}
+			appendDel(fmt.Sprintf("uid(v) <%s> * .", predicate))
+		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct {
+			childT := ft.Elem().Elem()
+			for j := 0; j < fv.Len(); j++ {
+				elemPtr := fv.Index(j)
+				if elemPtr.IsNil() {
+					continue
+				}
+				if childUID := structUID(elemPtr.Elem(), childT); childUID != "" {
+					appendSet(fmt.Sprintf("uid(v) <%s> <%s> .", predicate, childUID))
+				}
+			}
+		} else {
+			if fv.IsZero() {
+				continue
+			}
+			val, err := formatFieldValue(fv, ft, isJSON)
+			if err != nil {
+				return "", nil, fmt.Errorf("dquely: field %s: %w", field.Name, err)
+			}
+			appendSet(fmt.Sprintf("uid(v) <%s> %s .", predicate, val))
+		}
+	}
+
+	query := fmt.Sprintf("{\n  v as var(func: uid(%s))\n    @filter(type(%s))\n}", uid, typeName)
+	mu := &api.Mutation{
+		SetNquads: []byte(setSB.String()),
+		DelNquads: []byte(delSB.String()),
+		Cond:      "@if(eq(len(v), 1))",
+	}
+	return query, []*api.Mutation{mu}, nil
 }

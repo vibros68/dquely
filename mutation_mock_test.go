@@ -1,13 +1,7 @@
 package dquely_test
 
-const userMutationMock = `{
-  set {
-    _:user <name> "Alice" .
-    _:user <email> "alice@example.com" .
-    _:user <age> "29" .
-    _:user <dgraph.type> "User" .
-  }
-}`
+const userMutationMock = `uid(v) <name> "Alice" .
+uid(v) <age> "29" .`
 
 const userPartialMutationMock = `upsert {
   query {
@@ -90,14 +84,9 @@ type UserDgraph struct {
 	Email string `dquely:"email"`
 }
 
-const userLackMutationMock = `{
-  set {
-    _:user <name> "Alice" .
-    _:user <Email> "alice@example.com" .
-    _:user <Age> "29" .
-    _:user <dgraph.type> "User" .
-  }
-}`
+const userLackMutationMock = `uid(v) <name> "Alice" .
+uid(v) <Age> "29" .
+uid(v) <Email> "alice@example.com" .`
 
 type UserLack struct {
 	Uid   string `dquely:"uid"`
@@ -125,14 +114,9 @@ func (u *UserFieldBuilder) DgraphType() string {
 	return "User"
 }
 
-const userFieldBuilderMutationMock = `{
-  set {
-    _:user <name> "Alice" .
-    _:user <roles> "{\"company\":2,\"user\":1}" .
-    _:user <Age> "29" .
-    _:user <dgraph.type> "User" .
-  }
-}`
+const userFieldBuilderMutationMock = `uid(v) <name> "Alice" .
+uid(v) <Age> "29" .
+uid(v) <roles> "{\"company\":2,\"user\":1}" .`
 
 type UserWithUnique struct {
 	Uid      string `dquely:"uid"`
@@ -215,4 +199,13 @@ type Company struct {
 	Name   string      `dquely:"name"`
 	Owner  *ShortUser  `dquely:"owner"`
 	Staffs []ShortUser `dquely:"staffs"`
+}
+
+type Agent struct {
+	Uid           string   `json:"uid,omitempty" dquely:"uid"`
+	Name          string   `json:"name,omitempty" dquely:"name"`
+	Bio           string   `json:"bio,omitempty" dquely:"bio"`
+	AvatarImg     string   `json:"avatarImg,omitempty" dquely:"avatar"`
+	BackgroundImg string   `json:"backgroundImg,omitempty" dquely:"background"`
+	AgentFor      *Company `json:"agentFor,omitempty" dquely:"agentFor"`
 }

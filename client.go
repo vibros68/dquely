@@ -63,6 +63,11 @@ func (d *Dgo) Mutate(ctx context.Context, data any, deep ...bool) error {
 	if err != nil {
 		return fmt.Errorf("dgo: build mutation: %w", err)
 	}
+	fmt.Println(query)
+	fmt.Println(string(mu[0].Cond))
+	fmt.Println(string(mu[0].SetNquads))
+	fmt.Println("DelNquads: ")
+	fmt.Println(string(mu[0].DelNquads))
 	req := &api.Request{
 		Query:     query,
 		Mutations: mu,
@@ -88,6 +93,29 @@ func (d *Dgo) Mutate(ctx context.Context, data any, deep ...bool) error {
 	return SetUIDs(data, resp.Uids)
 }
 
+func (d *Dgo) Update(ctx context.Context, data any, fields ...string) error {
+	query, mu, err := ParseUpdate(data, fields...)
+	if err != nil {
+		return fmt.Errorf("dgo: build mutation: %w", err)
+	}
+	fmt.Println(query)
+	fmt.Println(string(mu[0].Cond))
+	fmt.Println(string(mu[0].SetNquads))
+	fmt.Println("DelNquads: ")
+	fmt.Println(string(mu[0].DelNquads))
+	req := &api.Request{
+		Query:     query,
+		Mutations: mu,
+		CommitNow: true,
+	}
+	resp, err := d.DG.NewTxn().Do(ctx, req)
+	if err != nil {
+		return fmt.Errorf("dgo: mutate: %w", err)
+	}
+	fmt.Println(resp.Uids)
+	return nil
+}
+
 type Query[T any] struct {
 	d *Dgo
 }
@@ -99,7 +127,7 @@ func Model[T any](d *Dgo) Query[T] {
 func (q Query[T]) First(ctx context.Context, filter DgFilter) (*T, error) {
 	var result *T
 	var query = filter.Query()
-	resp, err := q.d.DG.RunDQL(context.TODO(), query)
+	resp, err := q.d.DG.NewTxn().Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("dgo: query: %w", err)
 	}
@@ -107,7 +135,18 @@ func (q Query[T]) First(ctx context.Context, filter DgFilter) (*T, error) {
 	return result, nil
 }
 
-func (q Query[T]) parseData(data []byte, key string) (*T, error) {
+func (q Query[T]) Find(ctx context.Context, filter DgFilter) ([]T, error) {
+	var result []T
+	var query = filter.Query()
+	resp, err := q.d.DG.NewTxn().Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("dgo: query: %w", err)
+	}
+	result, err = q.parseDataMulti(resp.Json, filter.DgraphKey())
+	return result, nil
+}
+
+func (q Query[T]) parseDataMulti(data []byte, key string) ([]T, error) {
 	var raw map[string]json.RawMessage
 
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -116,6 +155,15 @@ func (q Query[T]) parseData(data []byte, key string) (*T, error) {
 
 	var arr []T
 	if err := json.Unmarshal(raw[key], &arr); err != nil {
+		return nil, err
+	}
+
+	return arr, nil
+}
+
+func (q Query[T]) parseData(data []byte, key string) (*T, error) {
+	arr, err := q.parseDataMulti(data, key)
+	if err != nil {
 		return nil, err
 	}
 
