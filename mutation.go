@@ -498,7 +498,7 @@ func structUID(v reflect.Value, t reflect.Type) string {
 
 // buildNquads writes raw N-quad lines for v into sb.
 // For each node the output order is:
-//  1. Primitive fields (strings/json first, then other scalars), each ending with ".\n".
+//  1. Primitive fields in struct declaration order, each ending with ".\n".
 //  2. All nested-struct references (uid-based <uid> or blank-node _:x), each ending with ".\n".
 //  3. dgraph.type triple (no trailing newline).
 //  4. Recursive content for blank-node children, each preceded by "\n".
@@ -516,46 +516,40 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 		skipContent bool // true when nested struct already has a uid
 	}
 
-	// Two passes: strings/json first, then non-string primitives (nested structs skipped).
-	for _, stringPass := range []bool{true, false} {
-		for i := 0; i < t.NumField(); i++ {
-			field := t.Field(i)
-			rawTag := field.Tag.Get("dquely")
-			if rawTag == "-" {
-				continue
-			}
-			predicate, isJSON, _ := parseTag(rawTag, field.Name)
-			if predicate == "uid" {
-				continue
-			}
-			ft := field.Type
-			if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
-				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) ||
-				(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct) {
-				continue
-			}
-			isString := ft.Kind() == reflect.String || isJSON
-			if isString != stringPass {
-				continue
-			}
-			fv := v.Field(i)
-			if fv.IsZero() {
-				continue
-			}
-			var valStr string
-			if isJSON {
-				b, err := json.Marshal(fv.Interface())
-				if err != nil {
-					return fmt.Errorf("dquely: failed to marshal field %s as JSON: %w", field.Name, err)
-				}
-				valStr = strings.ReplaceAll(string(b), `"`, `\"`)
-			} else if tv, ok := fv.Interface().(time.Time); ok {
-				valStr = tv.UTC().Format("2006-01-02T15:04:05")
-			} else {
-				valStr = fmt.Sprintf("%v", fv.Interface())
-			}
-			sb.WriteString(fmt.Sprintf("%s <%s> \"%s\" .\n", blankNode, predicate, valStr))
+	// Single pass in declaration order; nested struct fields are collected separately.
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		rawTag := field.Tag.Get("dquely")
+		if rawTag == "-" {
+			continue
 		}
+		predicate, isJSON, _ := parseTag(rawTag, field.Name)
+		if predicate == "uid" {
+			continue
+		}
+		ft := field.Type
+		if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
+			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) ||
+			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct) {
+			continue
+		}
+		fv := v.Field(i)
+		if fv.IsZero() {
+			continue
+		}
+		var valStr string
+		if isJSON {
+			b, err := json.Marshal(fv.Interface())
+			if err != nil {
+				return fmt.Errorf("dquely: failed to marshal field %s as JSON: %w", field.Name, err)
+			}
+			valStr = strings.ReplaceAll(string(b), `"`, `\"`)
+		} else if tv, ok := fv.Interface().(time.Time); ok {
+			valStr = tv.UTC().Format("2006-01-02T15:04:05")
+		} else {
+			valStr = fmt.Sprintf("%v", fv.Interface())
+		}
+		sb.WriteString(fmt.Sprintf("%s <%s> \"%s\" .\n", blankNode, predicate, valStr))
 	}
 
 	// Collect nested items in field declaration order (only in deep mode).
@@ -915,11 +909,11 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 
 	// Case A: No unique fields, no nested structs — raw N-quads, no condition.
 	if len(uniqueFields) == 0 {
-		nquads, err := rawNquads(v, t, "uid(v)", nil)
-		if err != nil {
+		var sb strings.Builder
+		if err := buildNquads(&sb, v, t, blankNode, typeName, false); err != nil {
 			return "", nil, err
 		}
-		return "", []*api.Mutation{{SetNquads: nquads}}, nil
+		return "", []*api.Mutation{{SetNquads: []byte(sb.String())}}, nil
 	}
 
 	// Non-zero unique fields used for query filter.
@@ -962,26 +956,10 @@ func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
 			qb.WriteString(")\n}")
 		}
 
-		// Build raw N-quads: two passes (strings/json first, then others).
 		var sb strings.Builder
-		for _, stringPass := range []bool{true, false} {
-			for _, fm := range allFields {
-				isString := t.Field(fm.index).Type.Kind() == reflect.String || fm.isJSON
-				if isString != stringPass {
-					continue
-				}
-				fv := v.Field(fm.index)
-				if fv.IsZero() {
-					continue
-				}
-				val, err := valueStr(fm)
-				if err != nil {
-					return "", nil, err
-				}
-				sb.WriteString(fmt.Sprintf("%s <%s> \"%s\" .\n", blankNode, fm.predicate, val))
-			}
+		if err := buildNquads(&sb, v, t, blankNode, typeName, false); err != nil {
+			return "", nil, err
 		}
-		sb.WriteString(fmt.Sprintf("%s <dgraph.type> \"%s\" .", blankNode, typeName))
 		nquads := []byte(sb.String())
 
 		mu := &api.Mutation{
@@ -1076,7 +1054,7 @@ const FieldAll = "_all_"
 // formatFieldValue returns the DQL literal representation of a struct field value.
 // All values are wrapped in double quotes. JSON fields are json-encoded first.
 // time.Time values are formatted as RFC3339 in UTC without timezone suffix.
-func formatFieldValue(fv reflect.Value, ft reflect.Type, isJSON bool) (string, error) {
+func formatFieldValue(fv reflect.Value, isJSON bool) (string, error) {
 	if isJSON {
 		b, err := json.Marshal(fv.Interface())
 		if err != nil {
@@ -1090,42 +1068,6 @@ func formatFieldValue(fv reflect.Value, ft reflect.Type, isJSON bool) (string, e
 	return `"` + fmt.Sprintf("%v", fv.Interface()) + `"`, nil
 }
 
-// rawNquads builds raw N-quad lines for the given struct value in declaration order.
-// Fields are formatted with native types (strings quoted, scalars unquoted).
-// No dgraph.type triple is appended.
-// When fieldSet is non-nil, only fields whose predicate is a key in fieldSet are included.
-func rawNquads(v reflect.Value, t reflect.Type, blankNode string, fieldSet map[string]bool) ([]byte, error) {
-	var sb strings.Builder
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		rawTag := field.Tag.Get("dquely")
-		if rawTag == "-" {
-			continue
-		}
-		predicate, isJSON, _ := parseTag(rawTag, field.Name)
-		if predicate == "uid" {
-			continue
-		}
-		if fieldSet != nil && !fieldSet[predicate] {
-			continue
-		}
-		ft := field.Type
-		if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
-			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) {
-			continue
-		}
-		fv := v.Field(i)
-		if fv.IsZero() {
-			continue
-		}
-		val, err := formatFieldValue(fv, ft, isJSON)
-		if err != nil {
-			return nil, fmt.Errorf("dquely: field %s: %w", field.Name, err)
-		}
-		sb.WriteString(fmt.Sprintf("%s <%s> %s .\n", blankNode, predicate, val))
-	}
-	return []byte(strings.TrimRight(sb.String(), "\n")), nil
-}
 
 // ParseUpdate generates a DGraph conditional-mutation query and api.Mutation for
 // updating an existing node identified by its uid field. The struct must have a
@@ -1246,7 +1188,7 @@ func ParseUpdate(input any, fields ...string) (string, []*api.Mutation, error) {
 			if fv.IsZero() {
 				continue
 			}
-			val, err := formatFieldValue(fv, ft, isJSON)
+			val, err := formatFieldValue(fv, isJSON)
 			if err != nil {
 				return "", nil, fmt.Errorf("dquely: field %s: %w", field.Name, err)
 			}

@@ -91,8 +91,11 @@ func TestMutationUserLack(t *testing.T) {
 	if len(mu[0].DelNquads) != 0 {
 		t.Fatalf("expected 0 DelNquads, got %d", len(mu[0].DelNquads))
 	}
-	if string(mu[0].SetNquads) != userLackMutationMock {
-		t.Errorf("expected Mutation() to return %s, got %s", userLackMutationMock, string(mu[0].SetNquads))
+	const expectedSet = `uid(v) <name> "Alice" .
+uid(v) <Age> "29" .
+uid(v) <Email> "alice@example.com" .`
+	if string(mu[0].SetNquads) != expectedSet {
+		t.Errorf("expected Mutation() to return %s, got %s", expectedSet, string(mu[0].SetNquads))
 	}
 }
 
@@ -116,22 +119,22 @@ func TestUpdateRelationship(t *testing.T) {
     @filter(type(Company))
 }`
 	if query != expectedQuery {
-		t.Errorf("expected ParseMutation() to get query %s, got %s", expectedQuery, query)
+		t.Errorf("expected ParseUpdate() to get query %s, got %s", expectedQuery, query)
 	}
 	var cond = muConds[0]
 	const expectedCond = `@if(eq(len(v), 1))`
 	if cond.Cond != expectedCond {
-		t.Errorf("expected ParseMutation() to get Condition be %s, got %s", expectedCond, cond.Cond)
+		t.Errorf("expected ParseUpdate() to get Condition be %s, got %s", expectedCond, cond.Cond)
 	}
 	const expectedNquads = `uid(v) <name> "A" .
 uid(v) <owner> <0x2> .`
 	if string(cond.SetNquads) != expectedNquads {
-		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedNquads,
+		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedNquads,
 			string(cond.SetNquads))
 	}
 	const expectedDelNquads = `uid(v) <owner> * .`
 	if string(cond.DelNquads) != expectedDelNquads {
-		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedDelNquads,
+		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedDelNquads,
 			string(cond.DelNquads))
 	}
 }
@@ -160,25 +163,25 @@ func TestUpdateRelationship_2(t *testing.T) {
     @filter(type(Company))
 }`
 	if query != expectedQuery {
-		t.Errorf("expected ParseMutation() to get query %s, got %s", expectedQuery, query)
+		t.Errorf("expected ParseUpdate() to get query %s, got %s", expectedQuery, query)
 	}
 	var cond = muConds[0]
 	const expectedCond = `@if(eq(len(v), 1))`
 	if cond.Cond != expectedCond {
-		t.Errorf("expected ParseMutation() to get Condition be %s, got %s", expectedCond, cond.Cond)
+		t.Errorf("expected ParseUpdate() to get Condition be %s, got %s", expectedCond, cond.Cond)
 	}
 	const expectedNquads = `uid(v) <name> "A" .
 uid(v) <owner> <0x2> .
 uid(v) <staffs> <0x3> .
 uid(v) <staffs> <0x4> .`
 	if string(cond.SetNquads) != expectedNquads {
-		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedNquads,
+		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedNquads,
 			string(cond.SetNquads))
 	}
 	const expectedDelNquads = `uid(v) <owner> * .
 uid(v) <staffs> * .`
 	if string(cond.DelNquads) != expectedDelNquads {
-		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedDelNquads,
+		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedDelNquads,
 			string(cond.DelNquads))
 	}
 }
@@ -228,12 +231,12 @@ func TestUpdateRelationship_3(t *testing.T) {
     @filter(type(Product))
 }`
 	if query != expectedQuery {
-		t.Errorf("expected ParseMutation() to get query %s, got %s", expectedQuery, query)
+		t.Errorf("expected ParseUpdate() to get query %s, got %s", expectedQuery, query)
 	}
 	var cond = muConds[0]
 	const expectedCond = `@if(eq(len(v), 1))`
 	if cond.Cond != expectedCond {
-		t.Errorf("expected ParseMutation() to get Condition be %s, got %s", expectedCond, cond.Cond)
+		t.Errorf("expected ParseUpdate() to get Condition be %s, got %s", expectedCond, cond.Cond)
 	}
 	const expectedNquads = `uid(v) <name> "Táo Mèo" .
 uid(v) <bio> "Táo Mèo ăn chua nhưng ngâm siro thì tuyệt cú mèo" .
@@ -242,12 +245,12 @@ uid(v) <medias> <0xea6f> .
 uid(v) <medias> <0xea70> .
 uid(v) <stores> <0xea6a> .`
 	if string(cond.SetNquads) != expectedNquads {
-		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedNquads,
+		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedNquads,
 			string(cond.SetNquads))
 	}
 	const expectedDelNquads = ``
 	if string(cond.DelNquads) != expectedDelNquads {
-		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedDelNquads,
+		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedDelNquads,
 			string(cond.DelNquads))
 	}
 }
