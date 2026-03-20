@@ -64,7 +64,7 @@ _:users0 <dgraph.type> "Membership" .`
 		t.Errorf("expected ParseMutation() to get Mutation be empty, got %s", string(cond.SetNquads))
 	}
 	// test SetUIDs
-	err = dquely.SetUIDs(&company, map[string]string{"company": "0xc352", "memberships0": "0xc353"})
+	err = dquely.SetUIDs(&company, map[string]string{"company": "0xc352", "users0": "0xc353"})
 	if err != nil {
 		t.Fatalf("dquely.SetUIDs: expect error to be nil got %v", err)
 	}

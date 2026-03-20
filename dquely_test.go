@@ -67,6 +67,7 @@ func TestComplexFullTextAndDate(t *testing.T) {
 
 func TestComplexNot(t *testing.T) {
 	dql := dquely.NewDQL("me")
+	dql.Uid()
 	dql = dql.Has("description").
 		Ngram("description", "brown fox").
 		Not(dquely.Eq("status", "archived")).

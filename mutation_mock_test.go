@@ -1,5 +1,7 @@
 package dquely_test
 
+import "time"
+
 const userMutationMock = `uid(v) <name> "Alice" .
 uid(v) <age> "29" .`
 
@@ -90,10 +92,11 @@ _:user <Email> "alice@example.com" .
 _:user <dgraph.type> "User" .`
 
 type UserLack struct {
-	Uid   string `dquely:"uid"`
-	Name  string `dquely:"name"`
-	Age   int
-	Email string
+	Uid    string `dquely:"uid"`
+	Name   string `dquely:"name"`
+	Age    int
+	Email  string
+	Amount *uint64
 }
 
 func (u *UserLack) DgraphType() string {
@@ -209,4 +212,42 @@ type Agent struct {
 	AvatarImg     string   `json:"avatarImg,omitempty" dquely:"avatar"`
 	BackgroundImg string   `json:"backgroundImg,omitempty" dquely:"background"`
 	AgentFor      *Company `json:"agentFor,omitempty" dquely:"agentFor"`
+}
+
+type Order struct {
+	Uid         string      `json:"uid,omitempty" dquely:"uid"`
+	Description string      `json:"description,omitempty" dquely:"description"`
+	CreatedAt   time.Time   `json:"createdAt,omitempty" dquely:"createdAt"`
+	UpdatedAt   time.Time   `json:"updatedAt,omitempty" dquely:"updatedAt"`
+	FinishedAt  *time.Time  `json:"finishedAt,omitempty" dquely:"finishedAt"`
+	Status      int32       `json:"status,omitempty" dquely:"status"`
+	Items       []OrderItem `json:"items,omitempty" dquely:"items"`
+	Taxes       []TaxItem   `json:"taxes,omitempty" dquely:"taxes"`
+	FinalAmount *int64      `json:"finalAmount,omitempty" dquely:"finalAmount"`
+}
+
+type OrderItem struct {
+	Uid         string   `json:"uid,omitempty" dquely:"uid"`
+	Name        string   `json:"name,omitempty" dquely:"name"`
+	Description string   `json:"description,omitempty" dquely:"description"`
+	Quantity    int64    `json:"quantity,omitempty" dquely:"quantity"`
+	Price       int64    `json:"price,omitempty" dquely:"price"`
+	Amount      int64    `json:"amount,omitempty" dquely:"amount"`
+	ProductFrom *Product `json:"productFrom,omitempty" dquely:"productFrom"`
+}
+
+type TaxItem struct {
+	Uid        string  `json:"uid,omitempty" dquely:"uid"`
+	RootAmount int64   `json:"rootAmount,omitempty" dquely:"rootAmount"`
+	TaxValue   float64 `json:"taxValue,omitempty" dquely:"taxValue"`
+	Amount     int64   `json:"amount,omitempty" dquely:"amount"`
+	Name       string  `json:"name,omitempty" dquely:"name"`
+	TaxOf      *Tax    `json:"taxOf,omitempty" dquely:"taxOf"`
+}
+
+type Tax struct {
+	Uid         string  `json:"uid,omitempty" dquely:"uid"`
+	Name        string  `json:"name,omitempty" dquely:"name"`
+	Description string  `json:"description,omitempty" dquely:"description"`
+	Value       float64 `json:"value,omitempty" dquely:"value"`
 }

@@ -290,6 +290,11 @@ func (d *DQuely) Uid(values ...any) *DQuely {
 	return d.Func(Uid(values...))
 }
 
+// UidIn adds a uid_in(predicate, ...) filter to this node.
+func (d *DQuely) UidIn(predicate string, values ...any) *DQuely {
+	return d.Filter(UidIn(predicate, values...))
+}
+
 // Func sets any FilterExpr as the root function.
 func (d *DQuely) Func(expr FilterExpr) *DQuely {
 	clone := d.getInstance()

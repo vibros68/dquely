@@ -7,6 +7,10 @@ import (
 	"github.com/vibros68/dquely"
 )
 
+var testTime = time.Unix(1772889031, 0)
+
+const testTimeValue = "2026-03-07T13:10:31"
+
 func TestUpsert(t *testing.T) {
 	user := User{Name: "Alice Sayum", Age: 30, Email: "alice@example.com"}
 	result, err := dquely.Upsert(user, dquely.Eq("email", "alice@example.com"), "age", "name")
@@ -634,7 +638,7 @@ func TestParseMutationRelation0(t *testing.T) {
 		Uid:       "",
 		Name:      "Mít Mật",
 		Bio:       "Mít Mật ăn thì hơi nhão và độ ngọt cao",
-		CreatedAt: time.Unix(1772889031, 0),
+		CreatedAt: testTime,
 		Price:     10000,
 		Medias: []*PMedia{
 			{Uid: "0xea72"},

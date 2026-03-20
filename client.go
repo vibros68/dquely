@@ -19,7 +19,8 @@ type Config struct {
 }
 
 type Dgo struct {
-	DG *dgo.Dgraph
+	DG    *dgo.Dgraph
+	Debug bool
 }
 
 // NewClient creates a Dgraph client and verifies connectivity.
@@ -58,16 +59,21 @@ func (d *Dgo) SetSchema(ctx context.Context, schema string) error {
 	return d.DG.Alter(ctx, op)
 }
 
+func (d *Dgo) debugMutation(query string, mu *api.Mutation) {
+	fmt.Printf("query: %s\n", query)
+	fmt.Printf("condition: %s\n", mu.Cond)
+	fmt.Printf("SetNquads: %s\n", mu.SetNquads)
+	fmt.Printf("DelNquads: %s\n", mu.DelNquads)
+}
+
 func (d *Dgo) Mutate(ctx context.Context, data any, deep ...bool) error {
 	query, mu, err := ParseMutation(data, deep...)
 	if err != nil {
 		return fmt.Errorf("dgo: build mutation: %w", err)
 	}
-	fmt.Println(query)
-	fmt.Println(string(mu[0].Cond))
-	fmt.Println(string(mu[0].SetNquads))
-	fmt.Println("DelNquads: ")
-	fmt.Println(string(mu[0].DelNquads))
+	if d.Debug {
+		d.debugMutation(query, mu[0])
+	}
 	req := &api.Request{
 		Query:     query,
 		Mutations: mu,
@@ -77,7 +83,9 @@ func (d *Dgo) Mutate(ctx context.Context, data any, deep ...bool) error {
 	if err != nil {
 		return fmt.Errorf("dgo: mutate: %w", err)
 	}
-
+	if d.Debug {
+		fmt.Printf("resp Uids: %+v\n", resp.Uids)
+	}
 	// If the conditional mutation fired, resp.Uids contains the new UID keyed by the
 	// blank-node name. Write it back into the struct's dquely:"uid" field.
 	blankNode, err := BlankNodeName(data)
@@ -98,11 +106,9 @@ func (d *Dgo) Update(ctx context.Context, data any, fields ...string) error {
 	if err != nil {
 		return fmt.Errorf("dgo: build mutation: %w", err)
 	}
-	fmt.Println(query)
-	fmt.Println(string(mu[0].Cond))
-	fmt.Println(string(mu[0].SetNquads))
-	fmt.Println("DelNquads: ")
-	fmt.Println(string(mu[0].DelNquads))
+	if d.Debug {
+		d.debugMutation(query, mu[0])
+	}
 	req := &api.Request{
 		Query:     query,
 		Mutations: mu,
@@ -112,7 +118,109 @@ func (d *Dgo) Update(ctx context.Context, data any, fields ...string) error {
 	if err != nil {
 		return fmt.Errorf("dgo: mutate: %w", err)
 	}
-	fmt.Println(resp.Uids)
+	if d.Debug {
+		fmt.Printf("resp Uids: %+v\n", resp.Uids)
+	}
+	return nil
+}
+
+// Txn represents an open Dgraph transaction. Use NewTxn to create one.
+// Call Discard (typically via defer) to release resources, and Commit to persist.
+// If any operation returns an error, call Discard to roll back.
+type Txn struct {
+	d   *Dgo
+	txn interface {
+		Do(ctx context.Context, req *api.Request) (*api.Response, error)
+		Commit(ctx context.Context) error
+		Discard(ctx context.Context) error
+	}
+}
+
+// NewTxn opens a new read-write transaction.
+// Typical usage:
+//
+//	txn := d.NewTxn()
+//	defer txn.Discard(ctx)
+//	if err := txn.Mutate(ctx, &user); err != nil { return err }
+//	return txn.Commit(ctx)
+func (d *Dgo) NewTxn() *Txn {
+	return &Txn{d: d, txn: d.DG.NewTxn()}
+}
+
+// Commit commits the transaction. Returns an error if the commit fails.
+func (t *Txn) Commit(ctx context.Context) error {
+	return t.txn.Commit(ctx)
+}
+
+// Discard releases the transaction resources. Safe to call after Commit.
+// Should be called via defer to ensure cleanup on error paths.
+func (t *Txn) Discard(ctx context.Context) {
+	_ = t.txn.Discard(ctx)
+}
+
+// DoTxn runs fn inside a single transaction. If fn returns an error the
+// transaction is discarded (rolled back); otherwise it is committed.
+func (d *Dgo) DoTxn(ctx context.Context, fn func(txn *Txn) error) error {
+	txn := d.NewTxn()
+	if err := fn(txn); err != nil {
+		txn.Discard(ctx)
+		return err
+	}
+	return txn.Commit(ctx)
+}
+
+// Mutate executes a mutation within the transaction without committing.
+func (t *Txn) Mutate(ctx context.Context, data any, deep ...bool) error {
+	query, mu, err := ParseMutation(data, deep...)
+	if err != nil {
+		return fmt.Errorf("dgo: build mutation: %w", err)
+	}
+	if t.d.Debug {
+		t.d.debugMutation(query, mu[0])
+	}
+	req := &api.Request{
+		Query:     query,
+		Mutations: mu,
+		CommitNow: false,
+	}
+	resp, err := t.txn.Do(ctx, req)
+	if err != nil {
+		return fmt.Errorf("dgo: mutate: %w", err)
+	}
+	if t.d.Debug {
+		fmt.Printf("resp Uids: %+v\n", resp.Uids)
+	}
+	blankNode, err := BlankNodeName(data)
+	if err != nil {
+		return fmt.Errorf("dgo: inject node name: %w", err)
+	}
+	if _, ok := resp.Uids[blankNode]; !ok {
+		return fmt.Errorf("mutate failed: duplicated")
+	}
+	return SetUIDs(data, resp.Uids)
+}
+
+// Update executes an update within the transaction without committing.
+func (t *Txn) Update(ctx context.Context, data any, fields ...string) error {
+	query, mu, err := ParseUpdate(data, fields...)
+	if err != nil {
+		return fmt.Errorf("dgo: build mutation: %w", err)
+	}
+	if t.d.Debug {
+		t.d.debugMutation(query, mu[0])
+	}
+	req := &api.Request{
+		Query:     query,
+		Mutations: mu,
+		CommitNow: false,
+	}
+	resp, err := t.txn.Do(ctx, req)
+	if err != nil {
+		return fmt.Errorf("dgo: mutate: %w", err)
+	}
+	if t.d.Debug {
+		fmt.Printf("resp Uids: %+v\n", resp.Uids)
+	}
 	return nil
 }
 
