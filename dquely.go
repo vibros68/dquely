@@ -6,7 +6,7 @@ import (
 )
 
 type DgFilter interface {
-	Query() string
+	DQuely() *DQuely
 	DgraphKey() string
 }
 
@@ -112,7 +112,7 @@ func Regexp(field, pattern string, flags ...string) FilterExpr {
 	if len(flags) > 0 {
 		flag = flags[0]
 	}
-	return FilterExpr{expr: fmt.Sprintf("regexp(%s, /%s/%s)", field, pattern, flag)}
+	return FilterExpr{expr: fmt.Sprintf("regexp(%s, /%s/%s)", field, escapeRegexpDelim(pattern), flag)}
 }
 
 // ExpandAll is the DGraph predicate that expands all predicates of a node.
@@ -148,12 +148,53 @@ func renderValue(v any) string {
 }
 
 func formatValue(v any) string {
-	switch v.(type) {
+	switch s := v.(type) {
 	case string:
-		return fmt.Sprintf(`"%v"`, v)
+		return `"` + escapeString(s) + `"`
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// escapeString escapes characters that would otherwise break DQL string syntax
+// or allow filter injection: backslash, double-quote and common control chars.
+func escapeString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// escapeRegexpDelim escapes forward slashes that are not already escaped, so a
+// pattern cannot terminate the /.../ delimiter early and inject filter syntax.
+func escapeRegexpDelim(pattern string) string {
+	var b strings.Builder
+	b.Grow(len(pattern))
+	prevBackslash := false
+	for _, r := range pattern {
+		if r == '/' && !prevBackslash {
+			b.WriteString(`\/`)
+		} else {
+			b.WriteRune(r)
+		}
+		prevBackslash = r == '\\' && !prevBackslash
+	}
+	return b.String()
 }
 
 type filter struct {
@@ -179,13 +220,28 @@ type DQuely struct {
 	filters      []filter
 }
 
+type BindFunc func(*DQuely) *DQuely
+
 func NewDQL(dgKey string) *DQuely {
 	return &DQuely{dgKey: dgKey}
+}
+
+func (d *DQuely) Scopes(fns ...BindFunc) *DQuely {
+	clone := d
+	for _, fn := range fns {
+		clone = fn(clone)
+	}
+	return clone
 }
 
 // DgraphKey returns the block name used by Query() and for JSON response parsing.
 func (d *DQuely) DgraphKey() string {
 	return d.dgKey
+}
+
+// DQuely returns the receiver, letting *DQuely satisfy the DgFilter interface.
+func (d *DQuely) DQuely() *DQuely {
+	return d
 }
 
 // NewVar creates a DGraph var block: var(func: ...) { ... }.
@@ -244,6 +300,9 @@ func (d *DQuely) Order(expr string, dir OrderDir) *DQuely {
 // on nested selects; appended to root args on root blocks.
 func (d *DQuely) First(n int) *DQuely {
 	clone := d.getInstance()
+	if n == 0 {
+		return clone
+	}
 	clone.firstN = &n
 	return clone
 }
@@ -251,6 +310,9 @@ func (d *DQuely) First(n int) *DQuely {
 // Offset adds an offset: N pagination directive, combined with First into one (first: N, offset: M) group.
 func (d *DQuely) Offset(n int) *DQuely {
 	clone := d.getInstance()
+	if n < 1 {
+		return clone
+	}
 	clone.offsetN = &n
 	return clone
 }
@@ -319,9 +381,7 @@ func (d *DQuely) Between(field string, from, to any) *DQuely {
 
 // Regexp sets func: regexp(field, /pattern/flags) as the root function.
 func (d *DQuely) Regexp(field, pattern string, flags ...string) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{isFuncPart: true, expr: Regexp(field, pattern, flags...).expr})
-	return clone
+	return d.Func(Regexp(field, pattern, flags...))
 }
 
 // Filter adds one or more FilterExpr to the @filter of this node (usable on root or nested selects).
@@ -335,70 +395,48 @@ func (d *DQuely) Filter(exprs ...FilterExpr) *DQuely {
 
 // Has sets func: has(field) as the root function.
 func (d *DQuely) Has(field string) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{isFuncPart: true, expr: fmt.Sprintf("has(%s)", field)})
-	return clone
+	return d.Func(Has(field))
 }
 
 // Type sets func: type(name) as the root function.
 func (d *DQuely) Type(typeName any) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{isFuncPart: true, expr: fmt.Sprintf("type(%v)", typeName)})
-	return clone
+	return d.Func(Type(typeName))
 }
 
 func (d *DQuely) Eq(key string, value any) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("eq(%s, %s)", key, formatValue(value))})
-	return clone
+	return d.Filter(Eq(key, value))
 }
 
 func (d *DQuely) Gt(key any, value any) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("gt(%s, %s)", renderKey(key), renderValue(value))})
-	return clone
+	return d.Filter(Gt(key, value))
 }
 
 func (d *DQuely) Ge(key any, value any) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("ge(%s, %s)", renderKey(key), renderValue(value))})
-	return clone
+	return d.Filter(Ge(key, value))
 }
 
 func (d *DQuely) Le(key any, value any) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("le(%s, %s)", renderKey(key), renderValue(value))})
-	return clone
+	return d.Filter(Le(key, value))
 }
 
 func (d *DQuely) Lt(key any, value any) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("lt(%s, %s)", renderKey(key), renderValue(value))})
-	return clone
+	return d.Filter(Lt(key, value))
 }
 
 func (d *DQuely) Ngram(key string, value string) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("ngram(%s, %s)", key, formatValue(value))})
-	return clone
+	return d.Filter(Ngram(key, value))
 }
 
 func (d *DQuely) AllOfText(key, value string) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("alloftext(%s, %s)", key, formatValue(value))})
-	return clone
+	return d.Filter(AllOfText(key, value))
 }
 
 func (d *DQuely) AnyOfText(key, value string) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: fmt.Sprintf("anyoftext(%s, %s)", key, formatValue(value))})
-	return clone
+	return d.Filter(AnyOfText(key, value))
 }
 
 func (d *DQuely) Not(expr FilterExpr) *DQuely {
-	clone := d.getInstance()
-	clone.filters = append(clone.filters, filter{expr: "NOT " + expr.expr})
-	return clone
+	return d.Filter(Not(expr))
 }
 
 // Or adds an AND-grouped OR filter: AND ( expr1 OR expr2 ... ).
@@ -579,6 +617,27 @@ func (d *DQuely) Query() string {
 	var sb strings.Builder
 	sb.WriteString("{\n")
 	d.renderBlock(&sb, d.dgKey)
+	sb.WriteString("}")
+	return sb.String()
+}
+
+// QueryAndCount builds a DQL string with the original query block plus a
+// "total" block that keeps the same func/filter but only fetches count(uid).
+func (d *DQuely) QueryAndCount() string {
+	var sb strings.Builder
+	sb.WriteString("{\n")
+	d.renderBlock(&sb, d.dgKey)
+
+	countClone := *d
+	countClone.selects = []any{"total: count(uid)"}
+	countClone.queryArgs = nil
+	countClone.firstN = nil
+	countClone.offsetN = nil
+	countClone.cascade = false
+	countClone.groupBy = ""
+	countClone.blockVarName = ""
+	countClone.renderBlock(&sb, "total")
+
 	sb.WriteString("}")
 	return sb.String()
 }

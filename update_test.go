@@ -70,7 +70,7 @@ func TestMutationWithDgraphType(t *testing.T) {
 
 func TestMutationUserLack(t *testing.T) {
 	var amount uint64 = 1000
-	user := &UserLack{Uid: "0x1", Name: "Alice", Age: 29, Email: "alice@example.com", Amount: &amount}
+	user := &UserLack{Uid: "0x1", Name: "Alice", Age: 29, Email: "alice@example.com", Amount: &amount, IsConfirmed: false}
 	query, mu, err := dquely.ParseUpdate(user, dquely.FieldAll)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +95,8 @@ func TestMutationUserLack(t *testing.T) {
 	const expectedSet = `uid(v) <name> "Alice" .
 uid(v) <Age> "29" .
 uid(v) <Email> "alice@example.com" .
-uid(v) <Amount> "1000" .`
+uid(v) <Amount> "1000" .
+uid(v) <isConfirmed> "false" .`
 	if string(mu[0].SetNquads) != expectedSet {
 		t.Errorf("expected Mutation() to return %s, got %s", expectedSet, string(mu[0].SetNquads))
 	}
@@ -290,12 +291,12 @@ func TestUpdateRelationship_4(t *testing.T) {
 	}
 	const expectedNquads = `uid(v) <name> "A" .
 uid(v) <owner> <0x2> .
-uid(v) <staffs> _:shortUser0 .
-uid(v) <staffs> _:shortUser1 .
-_:shortUser0 <name> "ShortUser1" .
-_:shortUser0 <link> <0x3> .
-_:shortUser1 <name> "ShortUser2" .
-_:shortUser1 <link> <0x4> .`
+uid(v) <staffs> _:staffs0 .
+uid(v) <staffs> _:staffs1 .
+_:staffs0 <name> "ShortUser1" .
+_:staffs0 <link> <0x3> .
+_:staffs1 <name> "ShortUser2" .
+_:staffs1 <link> <0x4> .`
 	if string(cond.SetNquads) != expectedNquads {
 		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedNquads,
 			string(cond.SetNquads))
@@ -345,13 +346,13 @@ func TestUpdateRelationship_5(t *testing.T) {
 	const expectedNquads = `uid(v) <updatedAt> "2026-03-07T13:10:31" .
 uid(v) <finishedAt> "2026-03-07T13:10:31" .
 uid(v) <status> "2" .
-uid(v) <taxes> _:taxItem0 .
+uid(v) <taxes> _:taxes0 .
 uid(v) <finalAmount> "21000" .
-_:taxItem0 <rootAmount> "10000" .
-_:taxItem0 <taxValue> "10" .
-_:taxItem0 <amount> "5000" .
-_:taxItem0 <name> "Alice" .
-_:taxItem0 <taxOf> <0x2> .`
+_:taxes0 <rootAmount> "10000" .
+_:taxes0 <taxValue> "10" .
+_:taxes0 <amount> "5000" .
+_:taxes0 <name> "Alice" .
+_:taxes0 <taxOf> <0x2> .`
 	if string(cond.SetNquads) != expectedNquads {
 		t.Errorf("expected ParseUpdate() to get Mutation %s, got %s", expectedNquads,
 			string(cond.SetNquads))
