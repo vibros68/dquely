@@ -14,6 +14,10 @@ func TestSimple(t *testing.T) {
 	if query != simpleMock {
 		t.Errorf("expected dql.Query() to return %s, got %s", simpleMock, query)
 	}
+	var countQuery = dql.QueryAndCount()
+	if countQuery != simpleMockAndCount {
+		t.Errorf("expected dql.QueryAndCount() to return %s, got %s", simpleMockAndCount, countQuery)
+	}
 }
 
 func TestFilter(t *testing.T) {
@@ -24,6 +28,10 @@ func TestFilter(t *testing.T) {
 	var query = dql.Query()
 	if query != filterMock {
 		t.Errorf("expected dql.Query() to return %s, got %s", filterMock, query)
+	}
+	var countQuery = dql.QueryAndCount()
+	if countQuery != filterMockAndCount {
+		t.Errorf("expected dql.QueryAndCount() to return %s, got %s", filterMockAndCount, countQuery)
 	}
 }
 

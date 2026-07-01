@@ -92,11 +92,12 @@ _:user <Email> "alice@example.com" .
 _:user <dgraph.type> "User" .`
 
 type UserLack struct {
-	Uid    string `dquely:"uid"`
-	Name   string `dquely:"name"`
-	Age    int
-	Email  string
-	Amount *uint64
+	Uid         string `dquely:"uid"`
+	Name        string `dquely:"name"`
+	Age         int
+	Email       string
+	Amount      *uint64
+	IsConfirmed bool `dquely:"isConfirmed"`
 }
 
 func (u *UserLack) DgraphType() string {

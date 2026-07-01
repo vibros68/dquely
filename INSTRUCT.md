@@ -61,11 +61,11 @@ func (u *User) DgraphType() string { return "Member" }
 ### Basic Query
 
 ```go
-q := dquely.NewDQL("").
+q := dquely.NewDQL("people").
     Type("Person").
     Select("uid", "name", "email")
 
-fmt.Println(q.Query("people"))
+fmt.Println(q.Query())
 ```
 
 ```
@@ -79,6 +79,11 @@ fmt.Println(q.Query("people"))
 ```
 
 ### Filters
+
+> **Security note:** string *values* passed to filters and mutations are escaped
+> automatically, so untrusted user input is safe as a value. Predicate/key names
+> (e.g. the `"age"` in `Gt("age", 18)`) are interpolated verbatim and are **not**
+> escaped — always supply trusted schema names for keys, never raw user input.
 
 **Single filter:**
 
@@ -275,6 +280,18 @@ q.Select(dquely.ExpandAll)
 // inline expand block:
 dquely.ExpandAllBlock("u as uid")
 // → expand(_all_) { u as uid }
+```
+
+### Scopes
+
+`Scopes` applies one or more `BindFunc` (`func(*DQuely) *DQuely`) in sequence,
+letting you factor reusable query fragments and compose them into a chain:
+
+```go
+onlyActive := func(q *dquely.DQuely) *dquely.DQuely { return q.Eq("active", true) }
+recent := func(q *dquely.DQuely) *dquely.DQuely { return q.Order("createdAt", dquely.DESC) }
+
+dquely.NewDQL("me").Type("Person").Scopes(onlyActive, recent).Select("uid", "name")
 ```
 
 ---
@@ -589,11 +606,11 @@ err := dquely.SetUID(user, "0x1234")
 
 ### SetUIDs
 
-Distributes multiple UIDs (e.g. from `api.Response.Uids` after a deep mutation) into a struct and its nested fields. Keys are matched by lowercase field name:
+Distributes multiple UIDs (e.g. from `api.Response.Uids` after a deep mutation) into a struct and its nested fields. Keys are matched by each field's `dquely` tag predicate (the part before any comma), falling back to the exact field name when the tag has no predicate:
 
 - Root struct — any key not matching a nested field is applied to the root's uid
-- Nested `*Struct` field — key = `strings.ToLower(FieldName)`
-- Nested `[]Struct` element at index j — key = `strings.ToLower(FieldName) + strconv.Itoa(j)`
+- Nested `*Struct` field — key = `predicate` (e.g. `dquely:"owner"` → `owner`)
+- Nested `[]Struct` element at index j — key = `predicate + strconv.Itoa(j)` (e.g. `dquely:"staffs"` → `staffs0`, `staffs1`, …)
 
 ```go
 company := &Company{
@@ -636,6 +653,20 @@ client, err := dquely.NewClient(dquely.Config{
 defer client.Close()
 ```
 
+For a local or development cluster without ACL enabled, use `NewClientInsecure` (username/password are not required):
+
+```go
+client, err := dquely.NewClientInsecure(dquely.Config{DNS: "localhost:9080"})
+```
+
+Set `Debug` to log the generated query and N-quads. By default debug output goes to
+`fmt.Printf`; assign `Logf` to route it through your own logger:
+
+```go
+client.Debug = true
+client.Logf = log.Printf // any func(format string, args ...any)
+```
+
 ### Applying a Schema
 
 ```go
@@ -665,7 +696,7 @@ err = client.Mutate(ctx, company, true)
 // company.Uid, company.Owner.Uid, company.Staffs[0].Uid, … all populated
 ```
 
-Returns `fmt.Errorf("mutate failed: duplicated")` when the conditional insert is rejected (duplicate detected via unique fields).
+Returns the sentinel `ErrDuplicate` when the conditional insert is rejected (duplicate detected via unique fields). Test for it with `errors.Is(err, dquely.ErrDuplicate)`.
 
 ### Querying
 
@@ -673,6 +704,61 @@ Returns `fmt.Errorf("mutate failed: duplicated")` when the conditional insert is
 
 ```go
 user, err := dquely.Model[User](client).First(ctx,
-    dquely.NewDQL("").Func(dquely.Eq("email", "alice@example.com")),
+    dquely.NewDQL("user").Func(dquely.Eq("email", "alice@example.com")),
 )
+// The block name passed to NewDQL ("user") is also used as the JSON key when
+// decoding the response, so it must be non-empty.
+```
+
+`First` forces `first: 1` on the query (any `First`/`Offset` on the filter is
+overridden) and returns `ErrNotFound` when nothing matches:
+
+```go
+if errors.Is(err, dquely.ErrNotFound) {
+    // no matching node
+}
+```
+
+`Find` returns all matching nodes; `FindAndCount` also returns the total count
+(pair the filter with `QueryAndCount` semantics for pagination):
+
+```go
+users, err := dquely.Model[User](client).Find(ctx, filter)
+users, total, err := dquely.Model[User](client).FindAndCount(ctx, filter)
+```
+
+### Update
+
+`Update` builds a uid-based conditional mutation (via `ParseUpdate`) and applies it.
+Pass predicate names to limit the update, or `dquely.FieldAll` for every non-zero field:
+
+```go
+err := client.Update(ctx, &User{Uid: "0x1", Name: "Bob"}, "name")
+err = client.Update(ctx, user, dquely.FieldAll)
+```
+
+`Mutate` also handles updates: when the struct's `uid` field is set it addresses the
+existing node by `<uid>` (no blank node), so it does not return `ErrDuplicate` on a
+successful update.
+
+### Raw query
+
+For cases the builder does not cover, run raw DQL and get the JSON response bytes:
+
+```go
+jsonBytes, err := client.Query(ctx, `{ q(func: type(User)) { uid name } }`)
+```
+
+### Transactions
+
+Group multiple mutations atomically with `DoTxn` (auto commit/rollback) or manage a
+`Txn` directly:
+
+```go
+err := client.DoTxn(ctx, func(txn *dquely.Txn) error {
+    if err := txn.Mutate(ctx, user); err != nil {
+        return err
+    }
+    return txn.Update(ctx, company, "name")
+})
 ```

@@ -395,6 +395,7 @@ func TestUndeepMutation(t *testing.T) {
 	var company = Company{
 		Name: "A",
 		Owner: &ShortUser{
+			Uid:  "0x1",
 			Name: "U",
 		},
 	}
@@ -413,6 +414,7 @@ func TestUndeepMutation(t *testing.T) {
 		t.Fatalf("expected ParseMutation() to get Condition be empty, got %s", cond.Cond)
 	}
 	const expectedSet = `_:company <name> "A" .
+_:company <owner> <0x1> .
 _:company <dgraph.type> "Company" .`
 	if string(cond.SetNquads) != expectedSet {
 		t.Errorf("expected ParseMutation() to get Mutation %s, got %s", expectedSet, string(cond.SetNquads))

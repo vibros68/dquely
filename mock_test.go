@@ -8,6 +8,17 @@ const simpleMock = `{
   }
 }`
 
+const simpleMockAndCount = `{
+  people(func: type(Person)) {
+    uid
+    name
+    friend
+  }
+  total(func: type(Person)) {
+    total: count(uid)
+  }
+}`
+
 const filterMock = `{
   people(func: type(Person)) @filter(gt(age, 18)) {
     uid
@@ -16,6 +27,20 @@ const filterMock = `{
       uid
       name
     }
+  }
+}`
+
+const filterMockAndCount = `{
+  people(func: type(Person)) @filter(gt(age, 18)) {
+    uid
+    name
+    friends {
+      uid
+      name
+    }
+  }
+  total(func: type(Person)) @filter(gt(age, 18)) {
+    total: count(uid)
   }
 }`
 

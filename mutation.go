@@ -3,7 +3,6 @@ package dquely
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/dgraph-io/dgo/v250/protos/api"
 	"reflect"
 	"strconv"
 	"strings"
@@ -66,7 +65,7 @@ func Mutation(input any) (string, error) {
 				}
 				valueStr = strings.ReplaceAll(string(b), `"`, `\"`)
 			} else {
-				valueStr = fmt.Sprintf("%v", val.Interface())
+				valueStr = escapeString(fmt.Sprintf("%v", val.Interface()))
 			}
 			sb.WriteString(fmt.Sprintf("    %s <%s> \"%s\" .\n", blankNode, predicate, valueStr))
 		}
@@ -274,221 +273,6 @@ func SetUID(input any, uid string) error {
 	return fmt.Errorf("dquely: struct has no field tagged dquely:\"uid\"")
 }
 
-// Upsert generates a DGraph upsert block that first queries for a node using matchExpr
-// (any FilterExpr such as Eq, Gt, AllOfTerms, etc.), then updates only the specified
-// updateFields using uid(var) as the subject.
-// Update fields are matched by their `dquely` struct tag and emitted in the order given.
-func Upsert(input any, matchExpr FilterExpr, updateFields ...string) (string, error) {
-	v := reflect.ValueOf(input)
-	t := reflect.TypeOf(input)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-		t = t.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return "", fmt.Errorf("dquely: Upsert expects a struct, got %s", v.Kind())
-	}
-
-	typeName := t.Name()
-	if dm, ok := input.(DgraphMutation); ok {
-		typeName = dm.DgraphType()
-	}
-	varName := strings.ToLower(typeName)
-
-	// Build predicate → field index map using parseTag so options like ,unique are stripped.
-	tagIndex := make(map[string]int, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		rawTag := t.Field(i).Tag.Get("dquely")
-		if rawTag == "" || rawTag == "-" {
-			continue
-		}
-		predicate, _, _ := parseTag(rawTag, t.Field(i).Name)
-		tagIndex[predicate] = i
-	}
-
-	var sb strings.Builder
-	sb.WriteString("upsert {\n  query {\n")
-	sb.WriteString(fmt.Sprintf("    %s as var(func: %s)\n", varName, matchExpr.expr))
-	sb.WriteString("  }\n  mutation {\n    set {\n")
-
-	for _, field := range updateFields {
-		idx, ok := tagIndex[field]
-		if !ok {
-			continue
-		}
-		val := v.Field(idx)
-		if val.IsZero() {
-			continue
-		}
-		sb.WriteString(fmt.Sprintf("      uid(%s) <%s> \"%v\" .\n", varName, field, val.Interface()))
-	}
-
-	sb.WriteString("    }\n  }\n}")
-	return sb.String(), nil
-}
-
-// MutationTriple represents a single RDF triple in a DGraph mutation block.
-type MutationTriple struct {
-	isDelete  bool
-	varRef    string
-	predicate string
-	value     string // pre-rendered: `"value"`, `val(a)`, `*`
-}
-
-// TripleSet creates a set triple with a literal value: uid(varRef) <predicate> "value" .
-func TripleSet(varRef, predicate string, value any) MutationTriple {
-	return MutationTriple{varRef: varRef, predicate: predicate, value: formatValue(value)}
-}
-
-// TripleSetVal creates a set triple with a val() reference: uid(varRef) <predicate> val(valVar) .
-func TripleSetVal(varRef, predicate, valVar string) MutationTriple {
-	return MutationTriple{varRef: varRef, predicate: predicate, value: fmt.Sprintf("val(%s)", valVar)}
-}
-
-// TripleDelete creates a delete triple with a wildcard: uid(varRef) <predicate> * .
-func TripleDelete(varRef, predicate string) MutationTriple {
-	return MutationTriple{isDelete: true, varRef: varRef, predicate: predicate, value: "*"}
-}
-
-// UpsertBlock builds a complete upsert block for any combination of set and delete triples.
-// If q has a BlockVar set, the query renders as "blockVar as var(func: ...) { selects }".
-// Otherwise it renders as "queryName(func: ...) { selects }".
-func UpsertBlock(queryName string, q *DQuely, triples ...MutationTriple) string {
-	funcExpr := ""
-	for _, f := range q.filters {
-		if f.isFuncPart {
-			funcExpr = f.expr
-			break
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString("upsert {\n  query {\n")
-
-	if q.blockVarName != "" {
-		sb.WriteString(fmt.Sprintf("    %s as var(func: %s)", q.blockVarName, funcExpr))
-		if len(q.selects) > 0 {
-			sb.WriteString(" {\n")
-			q.renderFields(&sb, "      ")
-			sb.WriteString("    }\n")
-		} else {
-			sb.WriteString("\n")
-		}
-	} else {
-		sb.WriteString(fmt.Sprintf("    %s(func: %s) {\n", queryName, funcExpr))
-		q.renderFields(&sb, "      ")
-		sb.WriteString("    }\n")
-	}
-
-	sb.WriteString("  }\n\n  mutation {\n")
-
-	var setTriples, deleteTriples []MutationTriple
-	for _, t := range triples {
-		if t.isDelete {
-			deleteTriples = append(deleteTriples, t)
-		} else {
-			setTriples = append(setTriples, t)
-		}
-	}
-
-	if len(setTriples) > 0 {
-		sb.WriteString("    set {\n")
-		for _, t := range setTriples {
-			sb.WriteString(fmt.Sprintf("      uid(%s) <%s> %s .\n", t.varRef, t.predicate, t.value))
-		}
-		sb.WriteString("    }\n")
-	}
-
-	if len(deleteTriples) > 0 {
-		sb.WriteString("    delete {\n")
-		for _, t := range deleteTriples {
-			sb.WriteString(fmt.Sprintf("      uid(%s) <%s> %s .\n", t.varRef, t.predicate, t.value))
-		}
-		sb.WriteString("    }\n")
-	}
-
-	sb.WriteString("  }\n}")
-	return sb.String()
-}
-
-// UpsertDelete generates a DGraph upsert block that queries nodes using matchExpr
-// and deletes the specified predicates with a wildcard (*) value.
-// varName is the variable assigned in the query block and referenced as uid(varName)
-// in the delete mutation.
-func UpsertDelete(varName string, matchExpr FilterExpr, fields ...string) (string, error) {
-	var sb strings.Builder
-	sb.WriteString("upsert {\n  query {\n")
-	sb.WriteString(fmt.Sprintf("    %s as var(func: %s)\n", varName, matchExpr.expr))
-	sb.WriteString("  }\n\n  mutation {\n    delete {\n")
-	for _, field := range fields {
-		sb.WriteString(fmt.Sprintf("      uid(%s) <%s> * .\n", varName, field))
-	}
-	sb.WriteString("    }\n  }\n}")
-	return sb.String(), nil
-}
-
-// UpsertWithQuery generates a DGraph upsert block with a full named query block
-// (as opposed to a bare var block). The query block is rendered using q and named
-// queryName. varRef is the variable assigned inside the query body (e.g. "v as uid")
-// and referenced as uid(varRef) in the mutation set.
-// Update fields are matched by their `dquely` struct tag and emitted in the order given.
-func UpsertWithQuery(queryName string, q *DQuely, varRef string, input any, updateFields ...string) (string, error) {
-	v := reflect.ValueOf(input)
-	t := reflect.TypeOf(input)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-		t = t.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return "", fmt.Errorf("dquely: UpsertWithQuery expects a struct, got %s", v.Kind())
-	}
-
-	// Build predicate → field index map using parseTag so options like ,unique are stripped.
-	tagIndex := make(map[string]int, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		rawTag := t.Field(i).Tag.Get("dquely")
-		if rawTag == "" || rawTag == "-" {
-			continue
-		}
-		predicate, _, _ := parseTag(rawTag, t.Field(i).Name)
-		tagIndex[predicate] = i
-	}
-
-	funcExpr := ""
-	for _, f := range q.filters {
-		if f.isFuncPart {
-			funcExpr = f.expr
-			break
-		}
-	}
-	argsStr := ""
-	if funcExpr != "" {
-		argsStr = "func: " + funcExpr
-	}
-
-	var sb strings.Builder
-	sb.WriteString("upsert {\n  query {\n")
-	sb.WriteString(fmt.Sprintf("    %s(%s) {\n", queryName, argsStr))
-	q.renderFields(&sb, "      ")
-	sb.WriteString("    }\n")
-	sb.WriteString("  }\n\n  mutation {\n    set {\n")
-
-	for _, field := range updateFields {
-		idx, ok := tagIndex[field]
-		if !ok {
-			continue
-		}
-		val := v.Field(idx)
-		if val.IsZero() {
-			continue
-		}
-		sb.WriteString(fmt.Sprintf("      uid(%s) <%s> \"%v\" .\n", varRef, field, val.Interface()))
-	}
-
-	sb.WriteString("    }\n  }\n}")
-	return sb.String(), nil
-}
-
 // structUID returns the value of the dquely:"uid" field in v, or "" if absent.
 func structUID(v reflect.Value, t reflect.Type) string {
 	for i := 0; i < t.NumField(); i++ {
@@ -498,6 +282,24 @@ func structUID(v reflect.Value, t reflect.Type) string {
 		}
 	}
 	return ""
+}
+
+// rootUID returns the dquely:"uid" value of the struct that input is or points to,
+// or "" when it has no uid field or the field is empty. A non-empty result means
+// the mutation is an update (addressing an existing node by <uid>) rather than an
+// insert that creates a new node from a blank node.
+func rootUID(input any) string {
+	v := reflect.ValueOf(input)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return ""
+	}
+	return structUID(v, v.Type())
 }
 
 // buildNquads writes raw N-quad lines for v into sb.
@@ -510,6 +312,13 @@ func structUID(v reflect.Value, t reflect.Type) string {
 // When a nested struct has a non-empty uid its reference is "<uid>" and no content is emitted
 // (the node already exists in DGraph).
 func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode, typeName string, deep bool) error {
+	// When this node already has a uid it must be addressed by <uid> so DGraph
+	// updates the existing node instead of creating a new one from the blank node.
+	subject := blankNode
+	if uid := structUID(v, t); uid != "" {
+		subject = fmt.Sprintf("<%s>", uid)
+	}
+
 	type nestedItem struct {
 		ref         string // "<uid>" for existing nodes, "_:predicate" for new blank nodes
 		blankNode   string // blank node name, only used when !skipContent
@@ -556,42 +365,66 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 			if tv, ok := dfv.Interface().(time.Time); ok {
 				valStr = tv.UTC().Format("2006-01-02T15:04:05")
 			} else {
-				valStr = fmt.Sprintf("%v", dfv.Interface())
+				valStr = escapeString(fmt.Sprintf("%v", dfv.Interface()))
 			}
 		}
-		sb.WriteString(fmt.Sprintf("%s <%s> \"%s\" .\n", blankNode, predicate, valStr))
+		sb.WriteString(fmt.Sprintf("%s <%s> \"%s\" .\n", subject, predicate, valStr))
 	}
 
-	// Collect nested items in field declaration order (only in deep mode).
+	// Collect nested items in field declaration order.
+	// Uid-based references are always emitted; blank-node references only when deep=true.
 	var nestedItems []nestedItem
-	if deep {
-		for i := 0; i < t.NumField(); i++ {
-			field := t.Field(i)
-			rawTag := field.Tag.Get("dquely")
-			if rawTag == "-" {
-				continue
-			}
-			predicate, _, _ := parseTag(rawTag, field.Name)
-			if predicate == "uid" {
-				continue
-			}
-			ft := field.Type
-			fv := v.Field(i)
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		rawTag := field.Tag.Get("dquely")
+		if rawTag == "-" {
+			continue
+		}
+		predicate, _, _ := parseTag(rawTag, field.Name)
+		if predicate == "uid" {
+			continue
+		}
+		ft := field.Type
+		fv := v.Field(i)
 
-			if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct && hasUIDField(ft.Elem()) {
-				if fv.IsNil() {
-					continue
-				}
-				childV := fv.Elem()
-				childT := ft.Elem()
+		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct && hasUIDField(ft.Elem()) {
+			if fv.IsNil() {
+				continue
+			}
+			childV := fv.Elem()
+			childT := ft.Elem()
+			if uid := structUID(childV, childT); uid != "" {
+				nestedItems = append(nestedItems, nestedItem{
+					ref:         fmt.Sprintf("<%s>", uid),
+					predicate:   predicate,
+					skipContent: true,
+				})
+			} else if deep {
+				bn := "_:" + predicate
+				nestedItems = append(nestedItems, nestedItem{
+					ref:       bn,
+					blankNode: bn,
+					v:         childV,
+					t:         childT,
+					typeName:  childT.Name(),
+					predicate: predicate,
+				})
+			}
+		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
+			if fv.IsNil() || fv.Len() == 0 {
+				continue
+			}
+			childT := ft.Elem()
+			for j := 0; j < fv.Len(); j++ {
+				childV := fv.Index(j)
 				if uid := structUID(childV, childT); uid != "" {
 					nestedItems = append(nestedItems, nestedItem{
 						ref:         fmt.Sprintf("<%s>", uid),
 						predicate:   predicate,
 						skipContent: true,
 					})
-				} else {
-					bn := "_:" + predicate
+				} else if deep {
+					bn := fmt.Sprintf("_:%s%d", predicate, j)
 					nestedItems = append(nestedItems, nestedItem{
 						ref:       bn,
 						blankNode: bn,
@@ -601,59 +434,34 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 						predicate: predicate,
 					})
 				}
-			} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-				if fv.IsNil() || fv.Len() == 0 {
+			}
+		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct {
+			if fv.IsNil() || fv.Len() == 0 {
+				continue
+			}
+			childT := ft.Elem().Elem()
+			for j := 0; j < fv.Len(); j++ {
+				elemPtr := fv.Index(j)
+				if elemPtr.IsNil() {
 					continue
 				}
-				childT := ft.Elem()
-				for j := 0; j < fv.Len(); j++ {
-					childV := fv.Index(j)
-					if uid := structUID(childV, childT); uid != "" {
-						nestedItems = append(nestedItems, nestedItem{
-							ref:         fmt.Sprintf("<%s>", uid),
-							predicate:   predicate,
-							skipContent: true,
-						})
-					} else {
-						bn := fmt.Sprintf("_:%s%d", predicate, j)
-						nestedItems = append(nestedItems, nestedItem{
-							ref:       bn,
-							blankNode: bn,
-							v:         childV,
-							t:         childT,
-							typeName:  childT.Name(),
-							predicate: predicate,
-						})
-					}
-				}
-			} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct {
-				if fv.IsNil() || fv.Len() == 0 {
-					continue
-				}
-				childT := ft.Elem().Elem()
-				for j := 0; j < fv.Len(); j++ {
-					elemPtr := fv.Index(j)
-					if elemPtr.IsNil() {
-						continue
-					}
-					childV := elemPtr.Elem()
-					if uid := structUID(childV, childT); uid != "" {
-						nestedItems = append(nestedItems, nestedItem{
-							ref:         fmt.Sprintf("<%s>", uid),
-							predicate:   predicate,
-							skipContent: true,
-						})
-					} else {
-						bn := fmt.Sprintf("_:%s%d", predicate, j)
-						nestedItems = append(nestedItems, nestedItem{
-							ref:       bn,
-							blankNode: bn,
-							v:         childV,
-							t:         childT,
-							typeName:  childT.Name(),
-							predicate: predicate,
-						})
-					}
+				childV := elemPtr.Elem()
+				if uid := structUID(childV, childT); uid != "" {
+					nestedItems = append(nestedItems, nestedItem{
+						ref:         fmt.Sprintf("<%s>", uid),
+						predicate:   predicate,
+						skipContent: true,
+					})
+				} else if deep {
+					bn := fmt.Sprintf("_:%s%d", predicate, j)
+					nestedItems = append(nestedItems, nestedItem{
+						ref:       bn,
+						blankNode: bn,
+						v:         childV,
+						t:         childT,
+						typeName:  childT.Name(),
+						predicate: predicate,
+					})
 				}
 			}
 		}
@@ -661,11 +469,11 @@ func buildNquads(sb *strings.Builder, v reflect.Value, t reflect.Type, blankNode
 
 	// All nested refs go before dgraph.type (uid-based and blank-node alike).
 	for _, item := range nestedItems {
-		sb.WriteString(fmt.Sprintf("%s <%s> %s .\n", blankNode, item.predicate, item.ref))
+		sb.WriteString(fmt.Sprintf("%s <%s> %s .\n", subject, item.predicate, item.ref))
 	}
 
 	// dgraph.type is always the last triple for this node.
-	sb.WriteString(fmt.Sprintf("%s <dgraph.type> \"%s\" .", blankNode, typeName))
+	sb.WriteString(fmt.Sprintf("%s <dgraph.type> \"%s\" .", subject, typeName))
 
 	// Emit recursive content for blank-node children.
 	for _, item := range nestedItems {
@@ -745,7 +553,7 @@ func findUniquenessQuery(v reflect.Value, t reflect.Type) string {
 					if k > 0 {
 						qb.WriteString(" OR ")
 					}
-					qb.WriteString(fmt.Sprintf("eq(%s, \"%v\")", f.predicate, c.v.Field(f.index).Interface()))
+					qb.WriteString(fmt.Sprintf("eq(%s, \"%s\")", f.predicate, escapeString(fmt.Sprintf("%v", c.v.Field(f.index).Interface()))))
 				}
 				qb.WriteString(")\n}\n")
 				return qb.String()
@@ -758,305 +566,6 @@ func findUniquenessQuery(v reflect.Value, t reflect.Type) string {
 		}
 	}
 	return ""
-}
-
-// ParseMutation inspects input (a non-nil pointer to a struct with a dquely:"uid" field)
-// and produces a DGraph upsert-ready query string and a slice of api.Mutation objects.
-//
-// The behaviour depends on whether the struct carries fields tagged with the "unique" option
-// and whether the uid field is populated:
-//
-//   - No unique fields (Case A — simple insert):
-//     Returns an empty query string and a single mutation whose SetNquads contains the
-//     full "{ set { … } }" block produced by Mutation(). No condition is set.
-//
-//   - Has unique fields, uid is empty (Case B — conditional insert):
-//     Builds a query that assigns variable "v" to all nodes of the same dgraph.type whose
-//     unique predicates match any of the non-zero unique field values (OR filter).
-//     The mutation SetNquads contains raw N-quads using a blank node (e.g. _:user),
-//     and the condition @if(eq(len(v), 0)) prevents the insert when a duplicate exists.
-//
-//   - Has unique fields, uid is non-empty (Case C — conditional update):
-//     Builds a two-variable query:
-//
-//   - "u" selects the node with the given uid, filtered by dgraph.type (must be 1).
-//
-//   - "v" selects any other node of the same type whose unique predicates overlap with
-//     the provided values, excluding the current uid (must be 0 for no duplicates).
-//     SetNquads updates non-zero fields using the concrete uid reference (e.g. <0x1>).
-//     DelNquads deletes zero-value fields: non-unique predicates first, unique ones after.
-//     The condition @if(eq(len(v), 0) AND eq(len(u), 1)) ensures both invariants hold.
-func ParseMutation(input any, deep ...bool) (string, []*api.Mutation, error) {
-	v := reflect.ValueOf(input)
-	t := reflect.TypeOf(input)
-	if v.Kind() != reflect.Ptr {
-		return "", nil, fmt.Errorf("dquely: ParseMutation expects a pointer to struct, got %s", v.Kind())
-	}
-	v = v.Elem()
-	t = t.Elem()
-	if v.Kind() != reflect.Struct {
-		return "", nil, fmt.Errorf("dquely: ParseMutation expects a pointer to struct, got pointer to %s", v.Kind())
-	}
-	if !hasUIDField(t) {
-		return "", nil, fmt.Errorf("dquely: ParseMutation requires a field tagged dquely:\"uid\" in the struct")
-	}
-
-	typeName := t.Name()
-	if dm, ok := input.(DgraphMutation); ok {
-		typeName = dm.DgraphType()
-	}
-	blankNode := "_:" + strings.ToLower(typeName)
-
-	// Get uid value.
-	uid := ""
-	for i := 0; i < t.NumField(); i++ {
-		predicate, _, _ := parseTag(t.Field(i).Tag.Get("dquely"), t.Field(i).Name)
-		if predicate == "uid" {
-			uid = v.Field(i).String()
-			break
-		}
-	}
-
-	// Collect metadata for all non-uid fields.
-	type fieldMeta struct {
-		index     int
-		predicate string
-		isJSON    bool
-		isUnique  bool
-	}
-	var allFields []fieldMeta
-	var uniqueFields []fieldMeta
-	for i := 0; i < t.NumField(); i++ {
-		rawTag := t.Field(i).Tag.Get("dquely")
-		if rawTag == "-" {
-			continue
-		}
-		predicate, isJSON, isUnique := parseTag(rawTag, t.Field(i).Name)
-		if predicate == "uid" {
-			continue
-		}
-		fm := fieldMeta{index: i, predicate: predicate, isJSON: isJSON, isUnique: isUnique}
-		allFields = append(allFields, fm)
-		if isUnique {
-			uniqueFields = append(uniqueFields, fm)
-		}
-	}
-
-	isDeep := len(deep) > 0 && deep[0]
-
-	// Structs with nested pointer-to-struct or slice-of-struct fields always use the
-	// buildNquads path regardless of unique fields.  Uniqueness for such structs must be
-	// enforced by the caller (the nested graph is mutated atomically).
-	hasNested := false
-	for i := 0; i < t.NumField(); i++ {
-		rawTag := t.Field(i).Tag.Get("dquely")
-		if rawTag == "-" {
-			continue
-		}
-		ft := t.Field(i).Type
-		if (ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct) ||
-			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct) ||
-			(ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct) {
-			hasNested = true
-			break
-		}
-	}
-	if hasNested {
-		var sb strings.Builder
-		if err := buildNquads(&sb, v, t, blankNode, typeName, isDeep); err != nil {
-			return "", nil, err
-		}
-		nquads := []byte(sb.String())
-
-		// No unique fields on root: recursively search nested fields for unique fields.
-		if len(uniqueFields) == 0 {
-			if isDeep {
-				if q := findUniquenessQuery(v, t); q != "" {
-					mu := &api.Mutation{
-						SetNquads: nquads,
-						Cond:      "@if(eq(len(v), 0))",
-					}
-					return q, []*api.Mutation{mu}, nil
-				}
-			}
-			return "", []*api.Mutation{{SetNquads: nquads}}, nil
-		}
-
-		// Has unique fields and uid is empty (nested Case B): generate query+condition
-		// for duplicate prevention while using the deep N-quads as the mutation body.
-		if uid == "" {
-			var nonZeroUniques []fieldMeta
-			for _, f := range uniqueFields {
-				if !v.Field(f.index).IsZero() {
-					nonZeroUniques = append(nonZeroUniques, f)
-				}
-			}
-			var qb strings.Builder
-			qb.WriteString("{\n")
-			qb.WriteString(fmt.Sprintf("  v as var(func: type(%s))\n    @filter(", typeName))
-			for i, f := range nonZeroUniques {
-				if i > 0 {
-					qb.WriteString(" OR ")
-				}
-				val := fmt.Sprintf("%v", v.Field(f.index).Interface())
-				qb.WriteString(fmt.Sprintf("eq(%s, \"%s\")", f.predicate, val))
-			}
-			if isDeep {
-				qb.WriteString(")\n}\n")
-			} else {
-				qb.WriteString(")\n}")
-			}
-			mu := &api.Mutation{
-				SetNquads: nquads,
-				Cond:      "@if(eq(len(v), 0))",
-			}
-			return qb.String(), []*api.Mutation{mu}, nil
-		}
-
-		// uid is non-empty: uid-based update, no duplicate query needed.
-		return "", []*api.Mutation{{SetNquads: nquads}}, nil
-	}
-
-	// Case A: No unique fields, no nested structs — raw N-quads, no condition.
-	if len(uniqueFields) == 0 {
-		var sb strings.Builder
-		if err := buildNquads(&sb, v, t, blankNode, typeName, false); err != nil {
-			return "", nil, err
-		}
-		return "", []*api.Mutation{{SetNquads: []byte(sb.String())}}, nil
-	}
-
-	// Non-zero unique fields used for query filter.
-	var nonZeroUniques []fieldMeta
-	for _, f := range uniqueFields {
-		if !v.Field(f.index).IsZero() {
-			nonZeroUniques = append(nonZeroUniques, f)
-		}
-	}
-
-	// valueStr returns the string representation of a field value.
-	valueStr := func(fm fieldMeta) (string, error) {
-		fv := v.Field(fm.index)
-		if fm.isJSON {
-			b, err := json.Marshal(fv.Interface())
-			if err != nil {
-				return "", fmt.Errorf("dquely: failed to marshal field %s as JSON: %w",
-					t.Field(fm.index).Name, err)
-			}
-			return strings.ReplaceAll(string(b), `"`, `\"`), nil
-		}
-		return fmt.Sprintf("%v", fv.Interface()), nil
-	}
-
-	// Case B: Insert (uid == "").
-	if uid == "" {
-		var qb strings.Builder
-		qb.WriteString("{\n")
-		qb.WriteString(fmt.Sprintf("  v as var(func: type(%s))\n    @filter(", typeName))
-		for i, f := range nonZeroUniques {
-			if i > 0 {
-				qb.WriteString(" OR ")
-			}
-			val := fmt.Sprintf("%v", v.Field(f.index).Interface())
-			qb.WriteString(fmt.Sprintf("eq(%s, \"%s\")", f.predicate, val))
-		}
-		if isDeep {
-			qb.WriteString(")\n}\n")
-		} else {
-			qb.WriteString(")\n}")
-		}
-
-		var sb strings.Builder
-		if err := buildNquads(&sb, v, t, blankNode, typeName, false); err != nil {
-			return "", nil, err
-		}
-		nquads := []byte(sb.String())
-
-		mu := &api.Mutation{
-			SetNquads: nquads,
-			Cond:      "@if(eq(len(v), 0))",
-		}
-		return qb.String(), []*api.Mutation{mu}, nil
-	}
-
-	// Case C: Update (uid != "").
-	uidRef := fmt.Sprintf("<%s>", uid)
-
-	// Build query with two-variable block.
-	var qb strings.Builder
-	qb.WriteString("{\n")
-	qb.WriteString(fmt.Sprintf("  u as var(func: uid(%s)) @filter(type(%s))\n\n", uid, typeName))
-	qb.WriteString(fmt.Sprintf("  v as var(func: type(%s))\n", typeName))
-	if len(nonZeroUniques) >= 2 {
-		// Tab-indented @filter for multiple unique conditions.
-		qb.WriteString("\t@filter(\n\t  (")
-		for i, f := range nonZeroUniques {
-			if i > 0 {
-				qb.WriteString(" OR ")
-			}
-			val := fmt.Sprintf("%v", v.Field(f.index).Interface())
-			qb.WriteString(fmt.Sprintf("eq(%s, \"%s\")", f.predicate, val))
-		}
-		qb.WriteString(")\n")
-		qb.WriteString(fmt.Sprintf("\t  AND NOT uid(%s)\n\t)\n}", uid))
-	} else if len(nonZeroUniques) == 1 {
-		// 4-space-indented @filter for a single unique condition.
-		f := nonZeroUniques[0]
-		val := fmt.Sprintf("%v", v.Field(f.index).Interface())
-		qb.WriteString(fmt.Sprintf("    @filter(\n      eq(%s, \"%s\") AND NOT uid(%s)\n    )\n}", f.predicate, val, uid))
-	} else {
-		qb.WriteString("}")
-	}
-
-	// Build SetNquads: declaration order, non-uid non-zero fields, no dgraph.type.
-	var setSB strings.Builder
-	firstSet := true
-	for _, fm := range allFields {
-		fv := v.Field(fm.index)
-		if fv.IsZero() {
-			continue
-		}
-		val, err := valueStr(fm)
-		if err != nil {
-			return "", nil, err
-		}
-		if !firstSet {
-			setSB.WriteByte('\n')
-		}
-		setSB.WriteString(fmt.Sprintf("%s <%s> \"%s\" .", uidRef, fm.predicate, val))
-		firstSet = false
-	}
-
-	// Build DelNquads: non-unique zero fields first, then unique zero fields.
-	var delSB strings.Builder
-	firstDel := true
-	for _, fm := range allFields {
-		if fm.isUnique || !v.Field(fm.index).IsZero() {
-			continue
-		}
-		if !firstDel {
-			delSB.WriteByte('\n')
-		}
-		delSB.WriteString(fmt.Sprintf("%s <%s> * .", uidRef, fm.predicate))
-		firstDel = false
-	}
-	for _, fm := range uniqueFields {
-		if !v.Field(fm.index).IsZero() {
-			continue
-		}
-		if !firstDel {
-			delSB.WriteByte('\n')
-		}
-		delSB.WriteString(fmt.Sprintf("%s <%s> * .", uidRef, fm.predicate))
-		firstDel = false
-	}
-
-	mu := &api.Mutation{
-		SetNquads: []byte(setSB.String()),
-		DelNquads: []byte(delSB.String()),
-		Cond:      "@if(eq(len(v), 0) AND eq(len(u), 1))",
-	}
-	return qb.String(), []*api.Mutation{mu}, nil
 }
 
 const FieldAll = "_all_"
@@ -1078,191 +587,5 @@ func formatFieldValue(fv reflect.Value, isJSON bool) (string, error) {
 	if t, ok := fv.Interface().(time.Time); ok {
 		return `"` + t.UTC().Format("2006-01-02T15:04:05") + `"`, nil
 	}
-	return `"` + fmt.Sprintf("%v", fv.Interface()) + `"`, nil
-}
-
-
-// ParseUpdate generates a DGraph conditional-mutation query and api.Mutation for
-// updating an existing node identified by its uid field. The struct must have a
-// non-empty field tagged dquely:"uid".
-//
-// Pass FieldAll ("_all_") to include all non-uid, non-zero fields in the update.
-// Pass one or more predicate names to limit the update to those specific fields.
-//
-// The returned query string is wrapped in a "{}" block, suitable for use directly
-// in an api.Request. The mutation carries:
-//   - SetNquads: scalar values as typed literals; relationship fields as <uid> references.
-//   - DelNquads: a wildcard delete for every relationship field that was requested, so
-//     stale edges are cleared before the new references are written.
-//   - Cond: "@if(eq(len(v), 1))" — only fires when exactly one node matches the uid
-func ParseUpdate(input any, fields ...string) (string, []*api.Mutation, error) {
-	v := reflect.ValueOf(input)
-	t := reflect.TypeOf(input)
-	if v.Kind() != reflect.Ptr {
-		return "", nil, fmt.Errorf("dquely: ParseUpdate expects a pointer to struct, got %s", v.Kind())
-	}
-	v = v.Elem()
-	t = t.Elem()
-	if v.Kind() != reflect.Struct {
-		return "", nil, fmt.Errorf("dquely: ParseUpdate expects a pointer to struct, got pointer to %s", v.Kind())
-	}
-	if !hasUIDField(t) {
-		return "", nil, fmt.Errorf("dquely: ParseUpdate requires a field tagged dquely:\"uid\" in the struct")
-	}
-
-	typeName := t.Name()
-	if dm, ok := input.(DgraphMutation); ok {
-		typeName = dm.DgraphType()
-	}
-	uid := ""
-	for i := 0; i < t.NumField(); i++ {
-		predicate, _, _ := parseTag(t.Field(i).Tag.Get("dquely"), t.Field(i).Name)
-		if predicate == "uid" {
-			uid = v.Field(i).String()
-			break
-		}
-	}
-	if uid == "" {
-		return "", nil, fmt.Errorf("dquely: ParseUpdate requires a non-empty uid field")
-	}
-
-	var fieldSet map[string]bool
-	if !(len(fields) == 1 && fields[0] == FieldAll) {
-		fieldSet = make(map[string]bool, len(fields))
-		for _, f := range fields {
-			fieldSet[f] = true
-		}
-	}
-
-	// Single pass in struct declaration order.
-	// Primitive fields go to setSB; relationship fields produce uid-references in setSB
-	// and a wildcard delete in delSB.
-	var setSB, delSB strings.Builder
-	firstSet, firstDel := true, true
-
-	appendSet := func(s string) {
-		if !firstSet {
-			setSB.WriteByte('\n')
-		}
-		setSB.WriteString(s)
-		firstSet = false
-	}
-	appendDel := func(s string) {
-		if !firstDel {
-			delSB.WriteByte('\n')
-		}
-		delSB.WriteString(s)
-		firstDel = false
-	}
-
-	// blankChild holds a []Struct element that has no uid and needs inline N-quad content.
-	type blankChild struct {
-		bn        string
-		v         reflect.Value
-		t         reflect.Type
-	}
-	var blankChildren []blankChild
-
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		rawTag := field.Tag.Get("dquely")
-		if rawTag == "-" {
-			continue
-		}
-		predicate, isJSON, _ := parseTag(rawTag, field.Name)
-		if predicate == "uid" {
-			continue
-		}
-		if fieldSet != nil && !fieldSet[predicate] {
-			continue
-		}
-		ft := field.Type
-		fv := v.Field(i)
-
-		if ft.Kind() == reflect.Ptr && ft.Elem().Kind() == reflect.Struct && hasUIDField(ft.Elem()) {
-			if !fv.IsNil() {
-				if childUID := structUID(fv.Elem(), ft.Elem()); childUID != "" {
-					appendSet(fmt.Sprintf("uid(v) <%s> <%s> .", predicate, childUID))
-				}
-			}
-			appendDel(fmt.Sprintf("uid(v) <%s> * .", predicate))
-		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Struct {
-			childT := ft.Elem()
-			for j := 0; j < fv.Len(); j++ {
-				childV := fv.Index(j)
-				if childUID := structUID(childV, childT); childUID != "" {
-					appendSet(fmt.Sprintf("uid(v) <%s> <%s> .", predicate, childUID))
-				} else {
-					name := childT.Name()
-				bn := fmt.Sprintf("_:%s%s%d", strings.ToLower(name[:1]), name[1:], j)
-					appendSet(fmt.Sprintf("uid(v) <%s> %s .", predicate, bn))
-					blankChildren = append(blankChildren, blankChild{bn, childV, childT})
-				}
-			}
-			appendDel(fmt.Sprintf("uid(v) <%s> * .", predicate))
-		} else if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Ptr && ft.Elem().Elem().Kind() == reflect.Struct {
-			childT := ft.Elem().Elem()
-			for j := 0; j < fv.Len(); j++ {
-				elemPtr := fv.Index(j)
-				if elemPtr.IsNil() {
-					continue
-				}
-				if childUID := structUID(elemPtr.Elem(), childT); childUID != "" {
-					appendSet(fmt.Sprintf("uid(v) <%s> <%s> .", predicate, childUID))
-				}
-			}
-		} else {
-			if fv.IsZero() {
-				continue
-			}
-			val, err := formatFieldValue(fv, isJSON)
-			if err != nil {
-				return "", nil, fmt.Errorf("dquely: field %s: %w", field.Name, err)
-			}
-			appendSet(fmt.Sprintf("uid(v) <%s> %s .", predicate, val))
-		}
-	}
-
-	// Emit inline N-quad content for []Struct blank-node children (no uid).
-	for _, bc := range blankChildren {
-		for k := 0; k < bc.t.NumField(); k++ {
-			cf := bc.t.Field(k)
-			cRawTag := cf.Tag.Get("dquely")
-			if cRawTag == "-" {
-				continue
-			}
-			cPredicate, cIsJSON, _ := parseTag(cRawTag, cf.Name)
-			if cPredicate == "uid" {
-				continue
-			}
-			cft := cf.Type
-			cfv := bc.v.Field(k)
-			if cft.Kind() == reflect.Ptr && cft.Elem().Kind() == reflect.Struct {
-				if !cfv.IsNil() {
-					if nestedUID := structUID(cfv.Elem(), cft.Elem()); nestedUID != "" {
-						appendSet(fmt.Sprintf("%s <%s> <%s> .", bc.bn, cPredicate, nestedUID))
-					}
-				}
-			} else if cft.Kind() == reflect.Slice {
-				// skip slices in child content for now
-			} else {
-				if cfv.IsZero() {
-					continue
-				}
-				val, err := formatFieldValue(cfv, cIsJSON)
-				if err != nil {
-					return "", nil, fmt.Errorf("dquely: field %s: %w", cf.Name, err)
-				}
-				appendSet(fmt.Sprintf("%s <%s> %s .", bc.bn, cPredicate, val))
-			}
-		}
-	}
-
-	query := fmt.Sprintf("{\n  v as var(func: uid(%s))\n    @filter(type(%s))\n}", uid, typeName)
-	mu := &api.Mutation{
-		SetNquads: []byte(setSB.String()),
-		DelNquads: []byte(delSB.String()),
-		Cond:      "@if(eq(len(v), 1))",
-	}
-	return query, []*api.Mutation{mu}, nil
+	return `"` + escapeString(fmt.Sprintf("%v", fv.Interface())) + `"`, nil
 }
